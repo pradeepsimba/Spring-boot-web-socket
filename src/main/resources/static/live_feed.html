@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Live Stock Data Feed</title>
+</head>
+<body>
+    <h1>Live Stock Data Feed</h1>
+    <ul id="live-data-list"></ul>
+
+    <script>
+        const liveDataList = document.getElementById('live-data-list');
+        const socket = new WebSocket('ws://192.168.0.119:8083/historical-data');
+
+        socket.onopen = function(event) {
+            console.log('WebSocket connection opened for live feed.');
+            // Send a message to identify this as a live feed client
+            socket.send(JSON.stringify({ type: "LIVE_FEED_INIT" }));
+        };
+
+        socket.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            liveDataList.innerHTML = ""; // Clear previous data
+            data.forEach(item => {
+                const listItem = document.createElement('li');
+                listItem.textContent = `Stock: ${item.stockname} (${item.stock_symbol}), Interval: ${item.interval}, Time: ${item.start_time}, Open: ${item.open}, High: ${item.high}, Low: ${item.low}, Close: ${item.close}, Volume: ${item.volume}`;
+                liveDataList.appendChild(listItem);
+            });
+        };
+
+        socket.onclose = function(event) {
+            console.log('WebSocket connection closed for live feed.');
+        };
+
+        socket.onerror = function(event) {
+            console.error('WebSocket error:', event);
+        };
+    </script>
+</body>
+</html>

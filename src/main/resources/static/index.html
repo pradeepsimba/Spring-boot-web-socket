@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>App Historical Data</title>
+</head>
+<body>
+    <h1>App Historical Data</h1>
+
+    <div>
+        <button id="getDataBtn">Get Data</button>
+    </div>
+
+    <ul id="data-list"></ul>
+
+    <script>
+        const dataList = document.getElementById('data-list');
+        const getDataBtn = document.getElementById('getDataBtn');
+        const socket = new WebSocket('ws://localhost:8083/historical-data');
+
+        let initialDataLoaded = false;
+
+        socket.onmessage = function(event) {
+            if (!initialDataLoaded) {
+                dataList.innerHTML = ''; // Clear previous data
+                initialDataLoaded = true;
+            }
+            const data = JSON.parse(event.data);
+            data.forEach(item => {
+                const listItem = document.createElement('li');
+                listItem.textContent = `Stock: ${item.stockname} (${item.stock_symbol}), Interval: ${item.interval}, Time: ${item.start_time}, Open: ${item.open}, High: ${item.high}, Low: ${item.low}, Close: ${item.close}, Volume: ${item.volume}`;
+                dataList.appendChild(listItem);
+            });
+        };
+
+        socket.onopen = function(event) {
+            console.log('WebSocket connection opened.');
+        };
+
+        socket.onclose = function(event) {
+            console.log('WebSocket connection closed.');
+        };
+
+        socket.onerror = function(event) {
+            console.error('WebSocket error:', event);
+        };
+
+        getDataBtn.onclick = function() {
+            initialDataLoaded = false; // Reset for new filter
+            const fromTime = "2025-09-15T13:21"; // Hardcoded fromTime
+            const stockNames = ["TCS", "INFY"]; // Hardcoded stock names
+            
+            const filterCriteria = {
+                fromTime: fromTime,
+                stockNames: stockNames
+            };
+
+            socket.send(JSON.stringify(filterCriteria));
+        };
+    </script>
+</body>
+</html>
