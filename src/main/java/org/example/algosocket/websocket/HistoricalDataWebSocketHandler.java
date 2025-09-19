@@ -21,6 +21,27 @@ import java.util.logging.Logger;
 
 @Component
 public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
+    // Broadcast real-time data to matching sessions
+    public void broadcastRealTimeData(org.example.algosocket.model.HistoricalData data) {
+        liveFeedSessions.forEach(session -> {
+            FilterCriteria filterCriteria = sessionFilters.get(session.getId());
+            if (filterCriteria != null && filterCriteria.getFilterObjects() != null) {
+                for (FilterCriteria.FilterObject fo : filterCriteria.getFilterObjects()) {
+                    if (data.getStockname().equals(fo.getStockname()) &&
+                        data.getStockSymbol().equals(fo.getStockSymbol()) &&
+                        data.getInterval().equals(fo.getInterval())) {
+                        try {
+                            String json = objectMapper.writeValueAsString(java.util.Collections.singletonList(data));
+                            session.sendMessage(new TextMessage(json));
+                        } catch (Exception e) {
+                            LOGGER.warning("Failed to send real-time data: " + e.getMessage());
+                        }
+                        break;
+                    }
+                }
+            }
+        });
+    }
 
     private static final Logger LOGGER = Logger.getLogger(HistoricalDataWebSocketHandler.class.getName());
 
@@ -30,12 +51,11 @@ public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
     private final List<WebSocketSession> sessions = new CopyOnWriteArrayList<>();
     private final List<WebSocketSession> liveFeedSessions = new CopyOnWriteArrayList<>();
     private final Map<String, FilterCriteria> sessionFilters = new ConcurrentHashMap<>();
-    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
 
     public HistoricalDataWebSocketHandler(HistoricalDataService historicalDataService, ObjectMapper objectMapper) {
-        this.historicalDataService = historicalDataService;
-        this.objectMapper = objectMapper;
-        scheduleUpdates();
+    this.historicalDataService = historicalDataService;
+    this.objectMapper = objectMapper;
+    // Real-time event streaming: scheduler removed
     }
 
     @Override
@@ -47,11 +67,35 @@ public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
     @Override
     protected void handleTextMessage(WebSocketSession session, TextMessage message) throws IOException {
         LOGGER.info("Received message: " + message.getPayload());
-        Map<String, String> messageMap = objectMapper.readValue(message.getPayload(), Map.class);
+        Map<String, Object> messageMap = objectMapper.readValue(message.getPayload(), Map.class);
 
         if ("LIVE_FEED_INIT".equals(messageMap.get("type"))) {
             liveFeedSessions.add(session);
             LOGGER.info("Live feed session initialized: " + session.getId());
+            // Parse filters from frontend and set sessionFilters for live feed
+            Object filtersObj = messageMap.get("filters");
+            boolean latestOnly = Boolean.TRUE.equals(messageMap.get("latestOnly"));
+            if (filtersObj instanceof List) {
+                List<?> filters = (List<?>) filtersObj;
+                List<FilterCriteria.FilterObject> filterObjects = new java.util.ArrayList<>();
+                for (Object filter : filters) {
+                    if (filter instanceof Map) {
+                        Map<?,?> filterMap = (Map<?,?>) filter;
+                        FilterCriteria.FilterObject fo = new FilterCriteria.FilterObject();
+                        Object stockname = filterMap.get("stockname");
+                        Object stockSymbol = filterMap.get("stock_symbol");
+                        Object interval = filterMap.get("interval");
+                        if (stockname != null) fo.setStockname(stockname.toString());
+                        if (stockSymbol != null) fo.setStockSymbol(stockSymbol.toString());
+                        if (interval != null) fo.setInterval(interval.toString());
+                        filterObjects.add(fo);
+                    }
+                }
+                FilterCriteria filterCriteria = new FilterCriteria();
+                filterCriteria.setFilterObjects(filterObjects);
+                sessionFilters.put(session.getId(), filterCriteria);
+                session.getAttributes().put("latestOnly", latestOnly);
+            }
         } else {
             FilterCriteria filterCriteria = objectMapper.readValue(message.getPayload(), FilterCriteria.class);
             sessionFilters.put(session.getId(), filterCriteria);
@@ -70,37 +114,6 @@ public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
     }
 
     private void scheduleUpdates() {
-        scheduler.scheduleAtFixedRate(() -> {
-            LOGGER.info("Scheduler is running...");
-            // Send updates to historical data sessions based on their filters
-            sessions.forEach(session -> {
-                FilterCriteria filterCriteria = sessionFilters.get(session.getId());
-                if (filterCriteria != null) {
-                    String historicalDataJson = historicalDataService.getHistoricalDataAsJson(filterCriteria);
-                    if (!"[]".equals(historicalDataJson)) {
-                        LOGGER.info("Found new data for historical session: " + session.getId());
-                        try {
-                            session.sendMessage(new TextMessage(historicalDataJson));
-                        } catch (IOException e) {
-                            LOGGER.warning("Failed to send message to historical session: " + session.getId() + " " + e.getMessage());
-                        }
-                    }
-                }
-            });
-
-            // Send latest updates to live feed sessions
-            String latestData = historicalDataService.getLatestDataAsJson(new FilterCriteria()); // Get all latest data
-            if (!"[]".equals(latestData)) {
-                liveFeedSessions.forEach(session -> {
-                    LOGGER.info("Found new data for live feed session: " + session.getId());
-                    try {
-                        session.sendMessage(new TextMessage(latestData));
-                    } catch (IOException e) {
-                        LOGGER.warning("Failed to send message to live feed session: " + session.getId() + " " + e.getMessage());
-                    }
-                });
-            }
-
-        }, 5, 5, TimeUnit.SECONDS);
+    // scheduleUpdates removed for real-time event streaming
     }
 }

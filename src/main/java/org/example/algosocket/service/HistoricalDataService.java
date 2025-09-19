@@ -14,6 +14,12 @@ import java.util.logging.Logger;
 
 @Service
 public class HistoricalDataService {
+    public List<HistoricalData> getLatestDataList(FilterCriteria filterCriteria) {
+        return repository.find(filterCriteria);
+    }
+    public ObjectMapper getObjectMapper() {
+        return objectMapper;
+    }
 
     private static final Logger LOGGER = Logger.getLogger(HistoricalDataService.class.getName());
 

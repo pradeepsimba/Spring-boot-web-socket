@@ -13,8 +13,15 @@
 
         socket.onopen = function(event) {
             console.log('WebSocket connection opened for live feed.');
-            // Send a message to identify this as a live feed client
-            socket.send(JSON.stringify({ type: "LIVE_FEED_INIT" }));
+            // Send a message to identify this as a live feed client with filtered data
+            socket.send(JSON.stringify({
+                type: "LIVE_FEED_INIT",
+                filters: [
+                    { stock_symbol: "HDFCBANK", stockname: "HDFC BANK", interval: "1m" }
+<!--                    { stock_symbol: "YESBANK", stockname: "YES BANK", interval: "5m" }-->
+                ],
+                latestOnly: true
+            }));
         };
 
         socket.onmessage = function(event) {
