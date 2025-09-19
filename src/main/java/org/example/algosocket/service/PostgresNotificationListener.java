@@ -58,7 +58,7 @@ public class PostgresNotificationListener implements Runnable {
             Connection conn = DriverManager.getConnection(dbUrl, dbUser, dbPass);
             Statement stmt = conn.createStatement();
 
-            // Create trigger function and trigger if not exists
+            // Create trigger function and trigger only for app_historical_data
             try {
                 stmt.executeUpdate("""
                     CREATE OR REPLACE FUNCTION notify_new_historical_data() RETURNS trigger AS $$
@@ -78,7 +78,7 @@ public class PostgresNotificationListener implements Runnable {
                         END IF;
                     END$$;
                 """);
-                LOGGER.info("Checked/created PostgreSQL trigger and function for NOTIFY.");
+                LOGGER.info("Checked/created PostgreSQL trigger and function for NOTIFY on app_historical_data only.");
             } catch (Exception e) {
                 LOGGER.warning("Error creating trigger/function: " + e.getMessage());
             }
@@ -93,7 +93,12 @@ public class PostgresNotificationListener implements Runnable {
                         String payload = notification.getParameter();
                         LOGGER.info("Received NOTIFY: " + payload);
                         try {
-                            ResultSet rs = stmt.executeQuery("SELECT * FROM app_historical_data WHERE id = " + payload);
+                            ResultSet rs = stmt.executeQuery(
+                                "SELECT h.*, i.quote, i.ltp, i.snap " +
+                                "FROM app_historical_data h " +
+                                "LEFT JOIN app_info i ON h.info_id = i.id " +
+                                "WHERE h.id = " + payload
+                            );
                             if (rs.next()) {
                                 HistoricalData data = new HistoricalData(
                                     rs.getString("stockname"),
@@ -105,7 +110,10 @@ public class PostgresNotificationListener implements Runnable {
                                     rs.getDouble("low"),
                                     rs.getDouble("close"),
                                     rs.getLong("volume"),
-                                    rs.getTimestamp("updated_at") != null ? rs.getTimestamp("updated_at").toLocalDateTime() : null
+                                    rs.getTimestamp("updated_at") != null ? rs.getTimestamp("updated_at").toLocalDateTime() : null,
+                                    rs.getString("quote"),
+                                    rs.getString("ltp"),
+                                    rs.getString("snap")
                                 );
                                 webSocketHandler.broadcastRealTimeData(data);
                             }

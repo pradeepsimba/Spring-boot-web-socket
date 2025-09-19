@@ -25,7 +25,7 @@ public class HistoricalDataRepository {
         }
 
     public List<HistoricalData> findAll() {
-        String sql = "SELECT * FROM app_historical_data";
+        String sql = "SELECT h.*, i.quote, i.ltp, i.snap FROM app_historical_data h LEFT JOIN app_info i ON h.info = i.id";
         return jdbcTemplate.query(sql, (rs, rowNum) -> toHistoricalData(rs));
     }
 
@@ -134,17 +134,21 @@ public class HistoricalDataRepository {
     }
 
     private HistoricalData toHistoricalData(ResultSet rs) throws SQLException {
-        return new HistoricalData(
-                rs.getString("stockname"),
-                rs.getString("stock_symbol"),
-                rs.getString("interval"),
-                rs.getTimestamp("start_time").toLocalDateTime(),
-                rs.getDouble("open"),
-                rs.getDouble("high"),
-                rs.getDouble("low"),
-                rs.getDouble("close"),
-                rs.getLong("volume"),
-                rs.getTimestamp("updated_at") != null ? rs.getTimestamp("updated_at").toLocalDateTime() : null
-        );
+    return new HistoricalData(
+        rs.getString("stockname"),
+        rs.getString("stock_symbol"),
+        rs.getString("interval"),
+        rs.getTimestamp("start_time").toLocalDateTime(),
+        rs.getDouble("open"),
+        rs.getDouble("high"),
+        rs.getDouble("low"),
+        rs.getDouble("close"),
+        rs.getLong("volume"),
+        rs.getTimestamp("updated_at") != null ? rs.getTimestamp("updated_at").toLocalDateTime() : null,
+        rs.getString("quote"),
+        rs.getString("ltp"),
+        rs.getString("snap")
+    );
     }
+
 }

@@ -36,7 +36,11 @@ public class HistoricalData {
     public HistoricalData() {
     }
 
-    public HistoricalData(String stockname, String stockSymbol, String interval, LocalDateTime startTime, Double open, Double high, Double low, Double close, Long volume, LocalDateTime updatedAt) {
+    private String quote;
+    private String ltp;
+    private String snap;
+
+    public HistoricalData(String stockname, String stockSymbol, String interval, LocalDateTime startTime, Double open, Double high, Double low, Double close, Long volume, LocalDateTime updatedAt, String quote, String ltp, String snap) {
         this.stockname = stockname;
         this.stockSymbol = stockSymbol;
         this.interval = interval;
@@ -47,7 +51,17 @@ public class HistoricalData {
         this.close = close;
         this.volume = volume;
         this.updatedAt = updatedAt;
+        this.quote = quote;
+        this.ltp = ltp;
+        this.snap = snap;
     }
+
+    public String getQuote() { return quote; }
+    public void setQuote(String quote) { this.quote = quote; }
+    public String getLtp() { return ltp; }
+    public void setLtp(String ltp) { this.ltp = ltp; }
+    public String getSnap() { return snap; }
+    public void setSnap(String snap) { this.snap = snap; }
 
     // Getters and setters
 

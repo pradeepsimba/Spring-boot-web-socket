@@ -29,7 +29,7 @@
             liveDataList.innerHTML = ""; // Clear previous data
             data.forEach(item => {
                 const listItem = document.createElement('li');
-                listItem.textContent = `Stock: ${item.stockname} (${item.stock_symbol}), Interval: ${item.interval}, Time: ${item.start_time}, Open: ${item.open}, High: ${item.high}, Low: ${item.low}, Close: ${item.close}, Volume: ${item.volume}`;
+                listItem.textContent = `Stock: ${item.stockname} (${item.stock_symbol}), Interval: ${item.interval}, Time: ${item.start_time}, Open: ${item.open}, High: ${item.high}, Low: ${item.low}, Close: ${item.close}, Volume: ${item.volume}, Quote: ${item.quote || ''}, LTP: ${item.ltp || ''}, Snap: ${item.snap || ''}`;
                 liveDataList.appendChild(listItem);
             });
         };
