@@ -51,7 +51,7 @@ public class PostgresNotificationListener implements Runnable {
                 dbPass = System.getenv("SPRING_DATASOURCE_PASSWORD");
             }
             if (dbUrl == null || dbUser == null || dbPass == null) {
-                dbUrl = "jdbc:postgresql://34.93.35.176:5432/algo?sessionTimezone=Asia/Kolkata";
+                dbUrl = "jdbc:postgresql://35.244.28.3:5432/algo?sessionTimezone=Asia/Kolkata";
                 dbUser = "postgres";
                 dbPass = "ab45cd12";
             }

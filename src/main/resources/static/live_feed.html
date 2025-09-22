@@ -17,8 +17,8 @@
             socket.send(JSON.stringify({
                 type: "LIVE_FEED_INIT",
                 filters: [
-                    { stock_symbol: "HDFCBANK", stockname: "HDFC BANK", interval: "1m" }
-<!--                    { stock_symbol: "YESBANK", stockname: "YES BANK", interval: "5m" }-->
+                    { stock_symbol: "1333", stockname: "HDFC BANK", interval: "1m" },
+                    { stock_symbol: "5258", stockname: "INDUSIND BANK", interval: "5m" }
                 ],
                 latestOnly: true
             }));
