@@ -1,31 +1,43 @@
 package org.example.algosocket.service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.algosocket.model.HistoricalData;
-import org.example.algosocket.model.FilterCriteria;
+import org.example.algosocket.repository.HistoricalDataRepository;
 import org.example.algosocket.websocket.HistoricalDataWebSocketHandler;
 import org.postgresql.PGConnection;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.ApplicationListener;
+import org.springframework.context.event.ContextRefreshedEvent;
 import org.springframework.stereotype.Service;
 
-import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
+import javax.sql.DataSource;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.logging.Logger;
 
 @Service
-public class PostgresNotificationListener implements Runnable {
+public class PostgresNotificationListener implements Runnable, ApplicationListener<ContextRefreshedEvent> {
     private static final Logger LOGGER = Logger.getLogger(PostgresNotificationListener.class.getName());
 
     @Autowired
     private HistoricalDataWebSocketHandler webSocketHandler;
 
+    @Autowired
+    private ObjectMapper objectMapper;
+
+    @Autowired
+    private DataSource dataSource;
+
     private Thread listenerThread;
     private volatile boolean running = true;
 
-    @PostConstruct
+    @Override
+    public void onApplicationEvent(ContextRefreshedEvent event) {
+        start();
+    }
+
     public void start() {
         listenerThread = new Thread(this, "PG-Notification-Listener");
         listenerThread.start();
@@ -41,21 +53,7 @@ public class PostgresNotificationListener implements Runnable {
 
     @Override
     public void run() {
-        try {
-            String dbUrl = System.getProperty("spring.datasource.url");
-            String dbUser = System.getProperty("spring.datasource.username");
-            String dbPass = System.getProperty("spring.datasource.password");
-            if (dbUrl == null || dbUser == null || dbPass == null) {
-                dbUrl = System.getenv("SPRING_DATASOURCE_URL");
-                dbUser = System.getenv("SPRING_DATASOURCE_USERNAME");
-                dbPass = System.getenv("SPRING_DATASOURCE_PASSWORD");
-            }
-            if (dbUrl == null || dbUser == null || dbPass == null) {
-                dbUrl = "jdbc:postgresql://35.244.28.3:5432/algo?sessionTimezone=Asia/Kolkata";
-                dbUser = "postgres";
-                dbPass = "ab45cd12";
-            }
-            Connection conn = DriverManager.getConnection(dbUrl, dbUser, dbPass);
+        try (Connection conn = dataSource.getConnection()) {
             Statement stmt = conn.createStatement();
 
             // Create trigger function and trigger only for app_historical_data
@@ -67,7 +65,8 @@ public class PostgresNotificationListener implements Runnable {
                       RETURN NEW;
                     END;
                     $$ LANGUAGE plpgsql;
-                """);
+                """
+                );
                 stmt.executeUpdate("""
                     DO $$
                     BEGIN
@@ -77,7 +76,8 @@ public class PostgresNotificationListener implements Runnable {
                             EXECUTE 'CREATE TRIGGER app_historical_data_notify AFTER INSERT OR UPDATE ON app_historical_data FOR EACH ROW EXECUTE FUNCTION notify_new_historical_data();';
                         END IF;
                     END$$;
-                """);
+                """
+                );
                 LOGGER.info("Checked/created PostgreSQL trigger and function for NOTIFY on app_historical_data only.");
             } catch (Exception e) {
                 LOGGER.warning("Error creating trigger/function: " + e.getMessage());
