@@ -10,3 +10,5 @@ services:
       - SPRING_DATASOURCE_URL=jdbc:postgresql://host.docker.internal:5432/algo?sessionTimezone=Asia/Kolkata
       - SPRING_DATASOURCE_USERNAME=postgres
       - SPRING_DATASOURCE_PASSWORD=ab45cd12
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
