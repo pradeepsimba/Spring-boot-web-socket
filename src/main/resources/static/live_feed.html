@@ -13,7 +13,7 @@
 
         socket.onopen = function(event) {
             console.log('WebSocket connection opened for live feed.');
-            // Send a message to identify this as a live feed client with filtered data
+            // Send a message to identify this as a live feed client with filtered data 
             socket.send(JSON.stringify({
                 type: "LIVE_FEED_INIT",
                 filters: [
