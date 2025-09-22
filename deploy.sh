@@ -1,0 +1,1 @@
+docker-compose -p ws up -d --build

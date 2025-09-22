@@ -1,0 +1,1 @@
+docker container prune -f && docker system prune -a -f && docker-compose -p ws down -v
