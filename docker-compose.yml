@@ -12,3 +12,4 @@ services:
       - SPRING_DATASOURCE_PASSWORD=ab45cd12
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    restart: always
