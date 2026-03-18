@@ -9,51 +9,41 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Objects;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 @Service
 public class HistoricalDataService {
-    public List<HistoricalData> getLatestDataList(FilterCriteria filterCriteria) {
-        return repository.find(filterCriteria);
-    }
-    public ObjectMapper getObjectMapper() {
-        return objectMapper;
-    }
 
     private static final Logger LOGGER = Logger.getLogger(HistoricalDataService.class.getName());
 
     private final HistoricalDataRepository repository;
     private final ObjectMapper objectMapper;
-    private LocalDateTime lastUpdateTime;
+    private volatile LocalDateTime lastUpdateTime;
 
     public HistoricalDataService(HistoricalDataRepository repository, ObjectMapper objectMapper) {
-    this.repository = repository;
-    this.objectMapper = objectMapper;
-    LocalDateTime latest = repository.findLatestUpdateTime();
-    this.lastUpdateTime = latest != null ? latest : LocalDateTime.now();
-    }
-
-    public String getAllHistoricalDataAsJson() {
-        return getHistoricalDataAsJson(new FilterCriteria());
+        this.repository = repository;
+        this.objectMapper = objectMapper;
+        LocalDateTime latest = repository.findLatestUpdateTime();
+        this.lastUpdateTime = latest != null ? latest : LocalDateTime.now();
     }
 
     public String getHistoricalDataAsJson(FilterCriteria filterCriteria) {
         List<HistoricalData> data = repository.find(filterCriteria);
         LOGGER.info("Fetched " + data.size() + " records from the database.");
         updateLastUpdateTime(data);
-        try {
-            return objectMapper.writeValueAsString(data);
-        } catch (JsonProcessingException e) {
-            LOGGER.log(Level.SEVERE, "Error converting data to JSON", e);
-            return "[]";
-        }
+        return toJson(data);
     }
 
     public String getLatestDataAsJson(FilterCriteria filterCriteria) {
         List<HistoricalData> data = repository.findLatest(filterCriteria, lastUpdateTime);
         LOGGER.info("Fetched " + data.size() + " new records from the database.");
         updateLastUpdateTime(data);
+        return toJson(data);
+    }
+
+    private String toJson(List<HistoricalData> data) {
         try {
             return objectMapper.writeValueAsString(data);
         } catch (JsonProcessingException e) {
@@ -63,12 +53,11 @@ public class HistoricalDataService {
     }
 
     private void updateLastUpdateTime(List<HistoricalData> data) {
-        if (data != null && !data.isEmpty()) {
-            data.stream()
-                    .map(HistoricalData::getUpdatedAt)
-                    .filter(java.util.Objects::nonNull)
-                    .max(LocalDateTime::compareTo)
-                    .ifPresent(latest -> lastUpdateTime = latest);
-        }
+        if (data == null || data.isEmpty()) return;
+        data.stream()
+                .map(HistoricalData::getUpdatedAt)
+                .filter(Objects::nonNull)
+                .max(LocalDateTime::compareTo)
+                .ifPresent(latest -> lastUpdateTime = latest);
     }
 }

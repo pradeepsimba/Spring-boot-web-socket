@@ -15,7 +15,8 @@
     <script>
         const dataList = document.getElementById('data-list');
         const getDataBtn = document.getElementById('getDataBtn');
-        const socket = new WebSocket('ws://localhost:8083/historical-data');
+        const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const socket = new WebSocket(wsProtocol + '//' + location.host + '/historical-data');
 
         let initialDataLoaded = false;
 
@@ -50,8 +51,8 @@
             const stockNames = ["TCS", "INFY"]; // Hardcoded stock names
             
             const filterCriteria = {
-                fromTime: fromTime,
-                stockNames: stockNames
+                from_time: fromTime,
+                stock_names: stockNames
             };
 
             socket.send(JSON.stringify(filterCriteria));

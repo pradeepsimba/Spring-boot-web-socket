@@ -9,21 +9,12 @@ version = '1.0-SNAPSHOT'
 
 repositories {
     mavenCentral()
-    jcenter()
-    google()
-    maven { url "https://packages.jetbrains.team/maven/p/ij/intellij-dependencies" }
-    flatDir {
-        dirs 'lib'
-    }
 }
 
 dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-web'
-    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
     implementation 'org.springframework.boot:spring-boot-starter-jdbc'
     implementation 'org.springframework.boot:spring-boot-starter-websocket'
-    implementation 'com.google.firebase:firebase-database:20.0.1'
-    implementation 'com.google.firebase:firebase-admin:9.0.0'
     implementation 'org.postgresql:postgresql:42.7.7'
     implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310'
     testImplementation 'org.springframework.boot:spring-boot-starter-test'

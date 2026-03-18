@@ -9,146 +9,122 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 @Repository
 public class HistoricalDataRepository {
+
+    private static final String BASE_SELECT =
+            "SELECT h.*, i.quote, i.ltp, i.snap FROM app_historical_data h LEFT JOIN app_info i ON h.info_id = i.id";
 
     private final JdbcTemplate jdbcTemplate;
 
     public HistoricalDataRepository(JdbcTemplate jdbcTemplate) {
         this.jdbcTemplate = jdbcTemplate;
     }
-        public LocalDateTime findLatestUpdateTime() {
-            String sql = "SELECT MAX(updated_at) FROM app_historical_data";
-            return jdbcTemplate.queryForObject(sql, LocalDateTime.class);
-        }
+
+    public LocalDateTime findLatestUpdateTime() {
+        return jdbcTemplate.queryForObject("SELECT MAX(updated_at) FROM app_historical_data", LocalDateTime.class);
+    }
 
     public List<HistoricalData> findAll() {
-        String sql = "SELECT h.*, i.quote, i.ltp, i.snap FROM app_historical_data h LEFT JOIN app_info i ON h.info = i.id";
-        return jdbcTemplate.query(sql, (rs, rowNum) -> toHistoricalData(rs));
+        return jdbcTemplate.query(BASE_SELECT, (rs, rowNum) -> mapRow(rs));
     }
 
-    public List<HistoricalData> find(FilterCriteria filterCriteria) {
-        // If filterObjects is present, build OR conditions for exact combinations
-        if (filterCriteria.getFilterObjects() != null && !filterCriteria.getFilterObjects().isEmpty()) {
-            StringBuilder sql = new StringBuilder("SELECT * FROM app_historical_data WHERE ");
-            List<Object> params = new ArrayList<>();
-            for (int i = 0; i < filterCriteria.getFilterObjects().size(); i++) {
-                if (i > 0) sql.append(" OR ");
-                sql.append("(stockname = ? AND stock_symbol = ? AND interval = ?)");
-                FilterCriteria.FilterObject fo = filterCriteria.getFilterObjects().get(i);
-                params.add(fo.getStockname());
-                params.add(fo.getStockSymbol());
-                params.add(fo.getInterval());
-            }
-            return jdbcTemplate.query(sql.toString(), params.toArray(), (rs, rowNum) -> toHistoricalData(rs));
-        } else {
-            StringBuilder sql = new StringBuilder("SELECT * FROM app_historical_data WHERE 1=1");
-            List<Object> params = new ArrayList<>();
-
-            if (filterCriteria.getFromTime() != null) {
-                sql.append(" AND start_time >= ?");
-                params.add(filterCriteria.getFromTime());
-            }
-
-            if (filterCriteria.getToTime() != null) {
-                sql.append(" AND start_time <= ?");
-                params.add(filterCriteria.getToTime());
-            }
-
-            if (filterCriteria.getStockNames() != null && !filterCriteria.getStockNames().isEmpty()) {
-                sql.append(" AND stockname IN (");
-                for (int i = 0; i < filterCriteria.getStockNames().size(); i++) {
-                    sql.append("?");
-                    if (i < filterCriteria.getStockNames().size() - 1) {
-                        sql.append(",");
-                    }
-                    params.add(filterCriteria.getStockNames().get(i));
-                }
-                sql.append(")");
-            }
-
-            if (filterCriteria.getStockSymbols() != null && !filterCriteria.getStockSymbols().isEmpty()) {
-                sql.append(" AND stock_symbol IN (");
-                for (int i = 0; i < filterCriteria.getStockSymbols().size(); i++) {
-                    sql.append("?");
-                    if (i < filterCriteria.getStockSymbols().size() - 1) {
-                        sql.append(",");
-                    }
-                    params.add(filterCriteria.getStockSymbols().get(i));
-                }
-                sql.append(")");
-            }
-
-            if (filterCriteria.getIntervals() != null && !filterCriteria.getIntervals().isEmpty()) {
-                sql.append(" AND interval IN (");
-                for (int i = 0; i < filterCriteria.getIntervals().size(); i++) {
-                    sql.append("?");
-                    if (i < filterCriteria.getIntervals().size() - 1) {
-                        sql.append(",");
-                    }
-                    params.add(filterCriteria.getIntervals().get(i));
-                }
-                sql.append(")");
-            }
-
-            return jdbcTemplate.query(sql.toString(), params.toArray(), (rs, rowNum) -> toHistoricalData(rs));
+    public List<HistoricalData> find(FilterCriteria criteria) {
+        if (hasFilterObjects(criteria)) {
+            return findByFilterObjects(criteria.getFilterObjects());
         }
-    }
 
-    public List<HistoricalData> findLatest(FilterCriteria filterCriteria, LocalDateTime since) {
-        if (filterCriteria.getFilterObjects() != null && !filterCriteria.getFilterObjects().isEmpty()) {
-            StringBuilder sql = new StringBuilder("SELECT * FROM app_historical_data WHERE updated_at > ?");
-            List<Object> params = new ArrayList<>();
-            params.add(since);
-            for (int i = 0; i < filterCriteria.getFilterObjects().size(); i++) {
-                sql.append(i == 0 ? " AND (" : " OR ");
-                sql.append("(stockname = ? AND stock_symbol = ? AND interval = ?)");
-                FilterCriteria.FilterObject fo = filterCriteria.getFilterObjects().get(i);
-                params.add(fo.getStockname());
-                params.add(fo.getStockSymbol());
-                params.add(fo.getInterval());
-            }
-            sql.append(")");
-            return jdbcTemplate.query(sql.toString(), params.toArray(), (rs, rowNum) -> toHistoricalData(rs));
-        } else {
-            StringBuilder sql = new StringBuilder("SELECT * FROM app_historical_data WHERE updated_at > ?");
-            List<Object> params = new ArrayList<>();
-            params.add(since);
+        StringBuilder sql = new StringBuilder(BASE_SELECT).append(" WHERE 1=1");
+        List<Object> params = new ArrayList<>();
 
-            if (filterCriteria.getStockNames() != null && !filterCriteria.getStockNames().isEmpty()) {
-                sql.append(" AND stockname IN (");
-                for (int i = 0; i < filterCriteria.getStockNames().size(); i++) {
-                    sql.append("?");
-                    if (i < filterCriteria.getStockNames().size() - 1) {
-                        sql.append(",");
-                    }
-                    params.add(filterCriteria.getStockNames().get(i));
-                }
-                sql.append(")");
-            }
-
-            return jdbcTemplate.query(sql.toString(), params.toArray(), (rs, rowNum) -> toHistoricalData(rs));
+        if (criteria.getFromTime() != null) {
+            sql.append(" AND h.start_time >= ?");
+            params.add(criteria.getFromTime());
         }
+        if (criteria.getToTime() != null) {
+            sql.append(" AND h.start_time <= ?");
+            params.add(criteria.getToTime());
+        }
+        appendInClause(sql, params, "h.stockname", criteria.getStockNames());
+        appendInClause(sql, params, "h.stock_symbol", criteria.getStockSymbols());
+        appendInClause(sql, params, "h.interval", criteria.getIntervals());
+
+        return jdbcTemplate.query(sql.toString(), (rs, rowNum) -> mapRow(rs), params.toArray());
     }
 
-    private HistoricalData toHistoricalData(ResultSet rs) throws SQLException {
-    return new HistoricalData(
-        rs.getString("stockname"),
-        rs.getString("stock_symbol"),
-        rs.getString("interval"),
-        rs.getTimestamp("start_time").toLocalDateTime(),
-        rs.getDouble("open"),
-        rs.getDouble("high"),
-        rs.getDouble("low"),
-        rs.getDouble("close"),
-        rs.getLong("volume"),
-        rs.getTimestamp("updated_at") != null ? rs.getTimestamp("updated_at").toLocalDateTime() : null,
-        rs.getString("quote"),
-        rs.getString("ltp"),
-        rs.getString("snap")
-    );
+    public List<HistoricalData> findLatest(FilterCriteria criteria, LocalDateTime since) {
+        StringBuilder sql = new StringBuilder(BASE_SELECT).append(" WHERE h.updated_at > ?");
+        List<Object> params = new ArrayList<>();
+        params.add(since);
+
+        if (hasFilterObjects(criteria)) {
+            appendFilterObjectConditions(sql, params, criteria.getFilterObjects());
+        } else {
+            appendInClause(sql, params, "h.stockname", criteria.getStockNames());
+        }
+
+        return jdbcTemplate.query(sql.toString(), (rs, rowNum) -> mapRow(rs), params.toArray());
     }
 
+    private List<HistoricalData> findByFilterObjects(List<FilterCriteria.FilterObject> filterObjects) {
+        StringBuilder sql = new StringBuilder(BASE_SELECT).append(" WHERE ");
+        List<Object> params = new ArrayList<>();
+
+        for (int i = 0; i < filterObjects.size(); i++) {
+            if (i > 0) sql.append(" OR ");
+            sql.append("(h.stockname = ? AND h.stock_symbol = ? AND h.interval = ?)");
+            FilterCriteria.FilterObject fo = filterObjects.get(i);
+            params.add(fo.getStockname());
+            params.add(fo.getStockSymbol());
+            params.add(fo.getInterval());
+        }
+
+        return jdbcTemplate.query(sql.toString(), (rs, rowNum) -> mapRow(rs), params.toArray());
+    }
+
+    private void appendFilterObjectConditions(StringBuilder sql, List<Object> params,
+                                               List<FilterCriteria.FilterObject> filterObjects) {
+        sql.append(" AND (");
+        for (int i = 0; i < filterObjects.size(); i++) {
+            if (i > 0) sql.append(" OR ");
+            sql.append("(h.stockname = ? AND h.stock_symbol = ? AND h.interval = ?)");
+            FilterCriteria.FilterObject fo = filterObjects.get(i);
+            params.add(fo.getStockname());
+            params.add(fo.getStockSymbol());
+            params.add(fo.getInterval());
+        }
+        sql.append(")");
+    }
+
+    private void appendInClause(StringBuilder sql, List<Object> params, String column, List<String> values) {
+        if (values == null || values.isEmpty()) return;
+        String placeholders = String.join(",", Collections.nCopies(values.size(), "?"));
+        sql.append(" AND ").append(column).append(" IN (").append(placeholders).append(")");
+        params.addAll(values);
+    }
+
+    private boolean hasFilterObjects(FilterCriteria criteria) {
+        return criteria.getFilterObjects() != null && !criteria.getFilterObjects().isEmpty();
+    }
+
+    private HistoricalData mapRow(ResultSet rs) throws SQLException {
+        return new HistoricalData(
+                rs.getString("stockname"),
+                rs.getString("stock_symbol"),
+                rs.getString("interval"),
+                rs.getTimestamp("start_time").toLocalDateTime(),
+                rs.getDouble("open"),
+                rs.getDouble("high"),
+                rs.getDouble("low"),
+                rs.getDouble("close"),
+                rs.getLong("volume"),
+                rs.getTimestamp("updated_at") != null ? rs.getTimestamp("updated_at").toLocalDateTime() : null,
+                rs.getString("quote"),
+                rs.getString("ltp"),
+                rs.getString("snap")
+        );
+    }
 }

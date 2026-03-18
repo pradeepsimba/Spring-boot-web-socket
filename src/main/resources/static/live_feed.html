@@ -9,7 +9,8 @@
 
     <script>
         const liveDataList = document.getElementById('live-data-list');
-        const socket = new WebSocket('ws://35.244.28.3:8083/historical-data');
+        const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const socket = new WebSocket(wsProtocol + '//' + location.host + '/historical-data');
 
         socket.onopen = function(event) {
             console.log('WebSocket connection opened for live feed.');
