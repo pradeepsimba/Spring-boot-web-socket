@@ -1,9 +1,6 @@
 package org.example.algosocket.config;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import org.example.algosocket.websocket.HistoricalDataWebSocketHandler;
-import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.socket.config.annotation.EnableWebSocket;
 import org.springframework.web.socket.config.annotation.WebSocketConfigurer;
@@ -17,14 +14,6 @@ public class WebSocketConfig implements WebSocketConfigurer {
 
     public WebSocketConfig(HistoricalDataWebSocketHandler historicalDataWebSocketHandler) {
         this.historicalDataWebSocketHandler = historicalDataWebSocketHandler;
-    }
-
-    @Bean
-    public ObjectMapper objectMapper() {
-        ObjectMapper mapper = new ObjectMapper();
-        mapper.setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
-        mapper.findAndRegisterModules();
-        return mapper;
     }
 
     @Override
