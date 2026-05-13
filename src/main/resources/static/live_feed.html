@@ -1,47 +1,849 @@
 <!DOCTYPE html>
-<html>
+<html lang="en" data-theme="dark">
 <head>
-    <title>Live Stock Data Feed</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Live + Historical Stock Data</title>
+  <style>
+
+    /* ===========================================================
+       RESET
+       Removes default browser spacing so our layout is consistent
+    =========================================================== */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+
+    /* ===========================================================
+       THEME COLORS
+       All colors live here. Edit dark or light values freely.
+       Every element below uses these variables — no hunting around.
+    =========================================================== */
+
+    /* Dark mode (default) */
+    :root {
+      --bg:             #0d0d0d;   /* page background */
+      --bg-header:      #141414;   /* top bar */
+      --bg-card:        #161616;   /* stock card */
+      --bg-card-header: #1a1a1a;   /* card title row */
+      --bg-th:          #1a1a1a;   /* table header row */
+      --border:         #222;      /* card / row borders */
+      --border-cell:    #1e1e1e;   /* table cell borders */
+      --text:           #e0e0e0;   /* body text */
+      --text-strong:    #ffffff;   /* stock name */
+      --text-sub:       #aaa;      /* interval label (1M, 3M…) */
+      --text-muted:     #999;      /* table column headers */
+      --text-dim:       #777;      /* "Updated …" timestamp */
+      --badge-bg:       #1e2a1e;
+      --badge-color:    #4caf50;
+      --badge-border:   #4caf5044;
+      --error-bg:       #1f0000;
+      --error-border:   #f4433655;
+      --error-text:     #f44336;
+      --row-hover:      #1c1c1c;
+      --flash-from:     #1a3a2a;   /* row highlight color on live update */
+      --empty-text:     #444;
+    }
+
+    /* Light mode — applied when <html data-theme="light"> */
+    [data-theme="light"] {
+      --bg:             #f0f2f5;
+      --bg-header:      #ffffff;
+      --bg-card:        #ffffff;
+      --bg-card-header: #f8f9fb;
+      --bg-th:          #f0f2f5;
+      --border:         #e0e4ea;
+      --border-cell:    #f0f2f5;
+      --text:           #1a1a1a;
+      --text-strong:    #000000;
+      --text-sub:       #555;
+      --text-muted:     #888;
+      --text-dim:       #aaa;
+      --badge-bg:       #e8f5e9;
+      --badge-color:    #2e7d32;
+      --badge-border:   #4caf5055;
+      --error-bg:       #fff3f3;
+      --error-border:   #f4433666;
+      --error-text:     #c62828;
+      --row-hover:      #f5f7fa;
+      --flash-from:     #c8e6c9;
+      --empty-text:     #bbb;
+    }
+
+
+    /* ===========================================================
+       BASE
+    =========================================================== */
+    body {
+      font-family: 'Segoe UI', Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      transition: background 0.25s, color 0.25s;
+    }
+
+
+    /* ===========================================================
+       HEADER  (sticky top bar)
+    =========================================================== */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      /* env() adds extra padding on phones with a notch */
+      padding: 14px max(24px, env(safe-area-inset-right)) 14px max(24px, env(safe-area-inset-left));
+      background: var(--bg-header);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      transition: background 0.25s, border-color 0.25s;
+    }
+    header h1 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: #4caf50;
+      white-space: nowrap;
+    }
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+
+
+    /* ===========================================================
+       WEBSOCKET STATUS DOT  (green = live, orange = connecting, red = off)
+    =========================================================== */
+    #wsStatus {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+    #wsDot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--text-dim);
+      transition: background 0.3s;
+      flex-shrink: 0;
+    }
+    #wsDot.connected    { background: #4caf50; box-shadow: 0 0 6px #4caf5099; }
+    #wsDot.disconnected { background: #f44336; }
+    #wsDot.connecting   { background: #ff9800; animation: pulse 1s infinite; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.3; }
+    }
+
+
+    /* ===========================================================
+       BUTTONS
+    =========================================================== */
+    /* shared button reset */
+    button {
+      touch-action: manipulation;  /* eliminates 300ms tap delay on iOS */
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    /* Dark / Light toggle */
+    #themeBtn {
+      min-width: 44px;
+      min-height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 1rem;
+      color: var(--text-muted);
+      transition: background 0.2s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #themeBtn:hover { background: var(--bg-card-header); color: var(--text); }
+
+    /* Load / Reload data */
+    #loadBtn {
+      padding: 0 18px;
+      min-height: 44px;
+      background: #4caf50;
+      color: #000;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.2s, opacity 0.2s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #loadBtn:hover:not(:disabled)  { background: #66bb6a; }
+    #loadBtn:active:not(:disabled) { background: #388e3c; }
+    #loadBtn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    /* Auto-scroll toggle */
+    #scrollBtn {
+      padding: 0 14px;
+      min-height: 44px;
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      white-space: nowrap;
+      transition: background 0.2s, color 0.2s, border-color 0.2s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #scrollBtn:hover { background: var(--bg-card-header); color: var(--text); }
+    #scrollBtn.active {
+      background: #1e3a1e;
+      border-color: #4caf5066;
+      color: #4caf50;
+    }
+    [data-theme="light"] #scrollBtn.active {
+      background: #e8f5e9;
+      border-color: #4caf5088;
+      color: #2e7d32;
+    }
+
+
+    /* ===========================================================
+       MAIN CONTENT AREA
+    =========================================================== */
+    main {
+      /* env() keeps content away from iPhone home bar / notch */
+      padding: 20px max(24px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left));
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+
+    /* ===========================================================
+       ERROR MESSAGE
+    =========================================================== */
+    #errorMsg {
+      display: none; /* shown by JS when fetch fails */
+      background: var(--error-bg);
+      border: 1px solid var(--error-border);
+      color: var(--error-text);
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 0.85rem;
+    }
+
+
+    /* ===========================================================
+       STOCK CARD
+    =========================================================== */
+    .stock-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      transition: background 0.25s, border-color 0.25s;
+    }
+    .stock-card-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 20px;
+      background: var(--bg-card-header);
+      border-bottom: 1px solid var(--border);
+      transition: background 0.25s, border-color 0.25s;
+    }
+    .stock-card-header h2 {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--text-strong);
+    }
+    /* Small pill showing the stock symbol number */
+    .stock-badge {
+      font-size: 0.7rem;
+      background: var(--badge-bg);
+      color: var(--badge-color);
+      border: 1px solid var(--badge-border);
+      padding: 2px 8px;
+      border-radius: 20px;
+    }
+    .intervals-wrapper { padding: 0 20px 20px; }
+
+
+    /* ===========================================================
+       INTERVAL SECTION  (one per candle timeframe: 1M, 3M, 5M…)
+    =========================================================== */
+    .interval-section { padding-top: 16px; }
+    .interval-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+    .interval-header h3 {
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--text-sub);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    .last-updated { font-size: 0.7rem; color: var(--text-dim); }
+
+
+    /* ===========================================================
+       CANDLE TABLE
+    =========================================================== */
+    .table-wrap {
+      border: 1px solid var(--border-cell);
+      border-radius: 6px;
+      overflow-x: auto;
+      overflow-y: auto;
+      max-height: 280px;
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior: contain; /* prevents page scroll chaining on iOS/Android */
+    }
+    table {
+      width: 100%;
+      min-width: 340px;    /* reduced from 380px so it fits narrower phones */
+      border-collapse: collapse;
+      font-size: 0.82rem;
+    }
+    thead {
+      position: sticky;
+      top: 0;              /* sticks to top of .table-wrap scroll container */
+      z-index: 5;
+    }
+    th {
+      background: var(--bg-th);
+      color: var(--text-muted);
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+      transition: background 0.25s;
+    }
+    td {
+      padding: 7px 10px;
+      border-bottom: 1px solid var(--border-cell);
+      color: var(--text);
+      white-space: nowrap;
+      transition: background 0.15s;
+    }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody tr:hover td { background: var(--row-hover); }
+
+    /* Close price color: green if price went up, red if it went down */
+    .bullish td.close { color: #4caf50; font-weight: 600; }
+    .bearish td.close { color: #f44336; font-weight: 600; }
+
+
+    /* ===========================================================
+       FLASH ANIMATION  (highlights a row when live data updates it)
+    =========================================================== */
+    @keyframes flash {
+      from { background-color: var(--flash-from); }
+      to   { background-color: transparent; }
+    }
+    .updated td { animation: flash 1.2s ease forwards; }
+
+
+    /* ===========================================================
+       EMPTY STATE
+    =========================================================== */
+    .empty-state {
+      text-align: center;
+      padding: 20px;
+      color: var(--empty-text);
+      font-size: 0.8rem;
+    }
+
+
+    /* ===========================================================
+       RESPONSIVE
+    =========================================================== */
+
+    /* ---- tablets and large phones (≤ 640px) ---- */
+    @media (max-width: 640px) {
+      header { padding: 10px 14px; gap: 8px; }
+      header h1 { font-size: 1rem; }
+      .header-right { gap: 8px; }
+      main {
+        padding: 12px 12px max(16px, env(safe-area-inset-bottom)) 12px;
+        gap: 12px;
+      }
+      .stock-card { border-radius: 8px; }
+      .stock-card-header { padding: 10px 14px; }
+      .stock-card-header h2 { font-size: 0.9rem; }
+      .intervals-wrapper { padding: 0 12px 14px; }
+      .interval-section { padding-top: 12px; }
+      .table-wrap { max-height: 240px; }
+      table { font-size: 0.78rem; }
+      th, td { padding: 6px 8px; }
+    }
+
+    /* ---- compact phones (≤ 480px): hide button labels, icon-only ---- */
+    @media (max-width: 480px) {
+      .btn-label { display: none; }         /* scrollBtn: icon only */
+      #scrollBtn { padding: 0 12px; }
+      #loadBtn { padding: 0 14px; font-size: 0.8rem; }
+      .table-wrap { max-height: 210px; }
+      table { min-width: 300px; font-size: 0.75rem; }
+      th, td { padding: 5px 7px; }
+    }
+
+    /* ---- very small phones (≤ 380px) ---- */
+    @media (max-width: 380px) {
+      header { padding: 8px 10px; gap: 6px; }
+      header h1 { font-size: 0.88rem; }
+      #wsLabel { display: none; }           /* dot only, no "Live" text */
+      #wsDot { width: 9px; height: 9px; }  /* slightly larger so it's still visible */
+      .header-right { gap: 6px; }
+      #themeBtn { min-width: 38px; min-height: 38px; font-size: 0.9rem; }
+      #scrollBtn { min-height: 38px; }
+      #loadBtn { min-height: 38px; padding: 0 12px; }
+      .stock-card-header { padding: 9px 12px; }
+      .intervals-wrapper { padding: 0 10px 12px; }
+      table { min-width: 280px; font-size: 0.72rem; }
+      th, td { padding: 4px 6px; }
+      .table-wrap { max-height: 190px; }
+    }
+
+  </style>
 </head>
 <body>
-    <h1>Live Stock Data Feed</h1>
-    <ul id="live-data-list"></ul>
 
-    <script>
-        const liveDataList = document.getElementById('live-data-list');
-        const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const socket = new WebSocket(wsProtocol + '//' + location.host + '/historical-data');
+  <header>
+    <h1>Stock Data</h1>
+    <div class="header-right">
+      <div id="wsStatus">
+        <div id="wsDot"></div>
+        <span id="wsLabel">Disconnected</span>
+      </div>
+      <button id="scrollBtn" aria-label="Toggle auto-scroll">↕<span class="btn-label"> Auto Scroll</span></button>
+      <button id="themeBtn" title="Toggle theme" aria-label="Toggle theme">🌙</button>
+      <button id="loadBtn">Load Historical Data</button>
+    </div>
+  </header>
 
-        socket.onopen = function(event) {
-            console.log('WebSocket connection opened for live feed.');
-            // Send a message to identify this as a live feed client with filtered data 
-            socket.send(JSON.stringify({
-                type: "LIVE_FEED_INIT",
-                filters: [
-                     { stock_symbol: "1333", stockname: "HDFC BANK", interval: "1m" }
-                    // { stock_symbol: "5258", stockname: "INDUSIND BANK", interval: "5m" }
-                ],
-                latestOnly: true
-            }));
-        };
+  <main>
+    <div id="errorMsg"></div>
+    <div id="dataContainer"></div>
+  </main>
 
-        socket.onmessage = function(event) {
-            const data = JSON.parse(event.data);
-            liveDataList.innerHTML = ""; // Clear previous data
-            data.forEach(item => {
-                const listItem = document.createElement('li');
-                listItem.textContent = `Stock: ${item.stockname} (${item.stock_symbol}), Interval: ${item.interval}, Time: ${item.start_time}, Open: ${item.open}, High: ${item.high}, Low: ${item.low}, Close: ${item.close}, Volume: ${item.volume}, Quote: ${item.quote || ''}, LTP: ${item.ltp || ''}, Snap: ${item.snap || ''}`;
-                liveDataList.appendChild(listItem);
-            });
-        };
+  <script>
 
-        socket.onclose = function(event) {
-            console.log('WebSocket connection closed for live feed.');
-        };
+    /* ===========================================================
+       CONFIG — everything a beginner needs to edit is right here
+    =========================================================== */
 
-        socket.onerror = function(event) {
-            console.error('WebSocket error:', event);
-        };
-    </script>
+    // Date range for historical data (format: YYYY-MM-DDTHH:MM:SS)
+    const _today = new Date().toISOString().slice(0, 10);
+    const FROM_DATE = `${_today}T09:15:00`;
+    const TO_DATE   = `${_today}T15:30:00`;
+
+    // Server addresses — same IP as page host, API on port 8000, WS on page port
+    const _host   = location.hostname;
+    const API_URL = `${location.protocol}//${_host}:8000/api/historical-data/?from_date=${FROM_DATE}&to_date=${TO_DATE}`;
+    const WS_URL  = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/historical-data`;
+
+    // Stocks to display — add or remove objects from this list
+    // intervals: candle timeframes to show (e.g. "1m", "3m", "5m", "15m")
+    const STOCKS = [
+      { stockname: "NIFTY 50",            stock_symbol: "99926000", intervals: ["1m", "3m", "5m"] },
+      { stockname: "KOTAK MAHINDRA BANK", stock_symbol: "1922",     intervals: ["1m", "3m", "5m"] },
+    ];
+
+
+    /* ===========================================================
+       HELPERS
+    =========================================================== */
+
+    // Returns true when the viewport is compact (phone)
+    const isMobile = () => window.innerWidth <= 480;
+
+    // Sets loadBtn text, using a shorter label on small screens
+    function setLoadBtnText(state) {
+      const btn = document.getElementById("loadBtn");
+      const mobile = isMobile();
+      if (state === "loading") btn.textContent = "Loading…";
+      else if (state === "reload") btn.textContent = "Reload";
+      else btn.textContent = mobile ? "Load" : "Load Historical Data";
+    }
+
+
+    /* ===========================================================
+       AUTO-SCROLL TOGGLE
+    =========================================================== */
+
+    let autoScroll = localStorage.getItem("autoScroll") !== "false"; // default ON
+
+    function applyAutoScroll(on) {
+      autoScroll = on;
+      const btn = document.getElementById("scrollBtn");
+      btn.classList.toggle("active", on);
+      btn.title = on ? "Auto-scroll ON — click to disable" : "Auto-scroll OFF — click to enable";
+      localStorage.setItem("autoScroll", on);
+    }
+
+    document.getElementById("scrollBtn").addEventListener("click", () => {
+      applyAutoScroll(!autoScroll);
+    });
+
+
+    /* ===========================================================
+       INTERNAL SETUP  (no need to edit below this line)
+    =========================================================== */
+
+    // Build the WebSocket subscription list from STOCKS automatically
+    const WS_FILTERS = STOCKS.flatMap(({ stock_symbol, stockname, intervals }) =>
+      intervals.map(interval => ({ stock_symbol, stockname, interval }))
+    );
+
+    let socket = null;
+    let reconnectDelay = 1000; // starts at 1s, doubles on each failed retry (max 30s)
+
+
+    /* ===========================================================
+       THEME  (dark / light toggle, saved across page reloads)
+    =========================================================== */
+
+    function applyTheme(theme) {
+      document.documentElement.setAttribute("data-theme", theme);
+      document.getElementById("themeBtn").textContent = theme === "dark" ? "🌙" : "☀️";
+      localStorage.setItem("theme", theme); // remember choice
+    }
+
+    function initTheme() {
+      const saved      = localStorage.getItem("theme");
+      const systemPref = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+      applyTheme(saved ?? systemPref); // saved choice wins, otherwise follow OS setting
+    }
+
+    document.getElementById("themeBtn").addEventListener("click", () => {
+      const current = document.documentElement.getAttribute("data-theme");
+      applyTheme(current === "dark" ? "light" : "dark");
+    });
+
+
+    /* ===========================================================
+       STATUS & ERROR  (update the UI dot / error banner)
+    =========================================================== */
+
+    function setWsStatus(state) {
+      document.getElementById("wsDot").className = state;
+      const labels = { connected: "Live", disconnected: "Disconnected", connecting: "Connecting…" };
+      document.getElementById("wsLabel").textContent = labels[state] ?? state;
+    }
+
+    function showError(msg) {
+      const el = document.getElementById("errorMsg");
+      el.textContent = msg;
+      el.style.display = msg ? "block" : "none";
+    }
+
+
+    /* ===========================================================
+       FORMATTING HELPERS
+    =========================================================== */
+
+    // Format a price to 2 decimal places using Indian number style (e.g. 1,23,456.78)
+    function formatPrice(val) {
+      const n = parseFloat(val);
+      return isNaN(n) ? val : n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    // Shorten large volume numbers  e.g. 1234567 → "1.23M",  12345 → "12.3K"
+    function formatVolume(val) {
+      const n = parseInt(val, 10);
+      if (isNaN(n))        return val;
+      if (n >= 1_000_000)  return (n / 1_000_000).toFixed(2) + "M";
+      if (n >= 1_000)      return (n / 1_000).toFixed(1) + "K";
+      return n.toString();
+    }
+
+    // Format ISO datetime string to HH:MM for the table time column
+    function formatTime(val) {
+      if (!val) return val;
+      // Accepts "2026-05-13T14:30:00" or any ISO string
+      const d = new Date(val);
+      if (isNaN(d.getTime())) return val;
+      return d.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: false });
+    }
+
+
+    /* ===========================================================
+       TABLE ROW HELPERS
+    =========================================================== */
+
+    // Build one <tr> from a candle data object
+    function createRow(symbol, interval, item) {
+      const tr = document.createElement("tr");
+      tr.id = `row-${symbol}-${interval}-${item.start_time}`;
+
+      // Green row if price closed higher than it opened, red if lower
+      tr.className = parseFloat(item.close) >= parseFloat(item.open) ? "bullish" : "bearish";
+
+      const cells = [
+        [formatTime(item.start_time),  "time"],
+        [formatPrice(item.open),       "open"],
+        [formatPrice(item.high),       "high"],
+        [formatPrice(item.low),        "low"],
+        [formatPrice(item.close),      "close"],
+        [formatVolume(item.volume),    "volume"],
+      ];
+
+      for (const [value, cssClass] of cells) {
+        const td = document.createElement("td");
+        td.className = cssClass;
+        td.textContent = value;
+        tr.appendChild(td);
+      }
+
+      return tr;
+    }
+
+    // Trigger the green flash animation on a row
+    function flashRow(row) {
+      row.classList.remove("updated");
+      void row.offsetWidth; // forces the browser to "reset" the animation so it replays
+      row.classList.add("updated");
+    }
+
+    // Update the small "Updated HH:MM:SS" text next to an interval heading
+    function setLastUpdated(sectionId) {
+      const el = document.querySelector(`#${sectionId} .last-updated`);
+      if (el) el.textContent = "Updated " + new Date().toLocaleTimeString();
+    }
+
+
+    /* ===========================================================
+       FETCH HISTORICAL DATA
+    =========================================================== */
+
+    async function fetchHistoricalData() {
+      const btn = document.getElementById("loadBtn");
+      btn.disabled = true;
+      setLoadBtnText("loading");
+      showError("");
+
+      try {
+        const res = await fetch(API_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(STOCKS),
+        });
+
+        if (!res.ok) throw new Error(`Server returned HTTP ${res.status}`);
+
+        const data = await res.json();
+        console.log("Historical data loaded:", data);
+        renderData(data);   // draw the tables
+        initWebSocket();    // then open the live feed
+        setLoadBtnText("reload");
+
+      } catch (err) {
+        showError(`Failed to load data: ${err.message}`);
+        btn.disabled = false;
+        setLoadBtnText("init");
+      }
+    }
+
+
+    /* ===========================================================
+       RENDER — build the stock cards and tables from API data
+    =========================================================== */
+
+    function renderData(data) {
+      const container = document.getElementById("dataContainer");
+      container.innerHTML = ""; // clear any previous render
+
+      for (const stock of data) {
+
+        // --- Card shell ---
+        const card = document.createElement("div");
+        card.className = "stock-card";
+        card.id = `stock-${stock.stock_symbol}`;
+
+        // --- Card header (stock name + symbol badge) ---
+        const cardHeader = document.createElement("div");
+        cardHeader.className = "stock-card-header";
+        cardHeader.innerHTML = `
+          <h2>${stock.stockname}</h2>
+          <span class="stock-badge">${stock.stock_symbol}</span>
+        `;
+        card.appendChild(cardHeader);
+
+        // --- Interval sections (one table per timeframe) ---
+        const wrapper = document.createElement("div");
+        wrapper.className = "intervals-wrapper";
+
+        for (const interval of stock.intervals) {
+          const rows = stock[`${interval} data`] || []; // key format from API: "1m data"
+          const sectionId = `interval-${stock.stock_symbol}-${interval}`;
+
+          const section = document.createElement("div");
+          section.className = "interval-section";
+          section.id = sectionId;
+          section.innerHTML = `
+            <div class="interval-header">
+              <h3>${interval}</h3>
+              <span class="last-updated"></span>
+            </div>
+          `;
+
+          // Scrollable table wrapper
+          const tableWrap = document.createElement("div");
+          tableWrap.className = "table-wrap";
+
+          const table = document.createElement("table");
+          table.innerHTML = `
+            <thead>
+              <tr>
+                <th>Time</th><th>Open</th><th>High</th><th>Low</th><th>Close</th><th>Volume</th>
+              </tr>
+            </thead>
+          `;
+
+          const tbody = document.createElement("tbody");
+
+          if (rows.length === 0) {
+            // No data for this interval
+            const emptyRow = document.createElement("tr");
+            emptyRow.innerHTML = `<td colspan="6" class="empty-state">No data available</td>`;
+            tbody.appendChild(emptyRow);
+          } else {
+            for (const item of rows) {
+              tbody.appendChild(createRow(stock.stock_symbol, interval, item));
+            }
+          }
+
+          table.appendChild(tbody);
+          tableWrap.appendChild(table);
+          section.appendChild(tableWrap);
+          wrapper.appendChild(section);
+        }
+
+        card.appendChild(wrapper);
+        container.appendChild(card);
+      }
+    }
+
+
+    /* ===========================================================
+       WEBSOCKET — live candle updates
+    =========================================================== */
+
+    function initWebSocket() {
+      // Close any existing connection before opening a new one
+      if (socket && socket.readyState < WebSocket.CLOSING) socket.close();
+
+      setWsStatus("connecting");
+      socket = new WebSocket(WS_URL);
+
+      socket.onopen = () => {
+        setWsStatus("connected");
+        reconnectDelay = 1000; // reset backoff on successful connection
+
+        // Tell the server which stocks + intervals we want
+        socket.send(JSON.stringify({
+          type: "LIVE_FEED_INIT",
+          filters: WS_FILTERS,
+          latestOnly: true, // server sends only the current (latest) candle
+        }));
+      };
+
+      socket.onmessage = ({ data }) => {
+        try {
+          JSON.parse(data).forEach(applyLiveUpdate);
+        } catch (e) {
+          console.error("Could not parse WebSocket message:", e);
+        }
+      };
+
+      socket.onclose = () => {
+        setWsStatus("disconnected");
+        // Auto-reconnect with exponential backoff: 1s → 2s → 4s → … → 30s max
+        setTimeout(initWebSocket, reconnectDelay);
+        reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+      };
+
+      socket.onerror = (e) => console.error("WebSocket error:", e);
+    }
+
+
+    /* ===========================================================
+       APPLY LIVE UPDATE — patch a single candle row in the table
+    =========================================================== */
+
+    function applyLiveUpdate(update) {
+      const sectionId = `interval-${update.stock_symbol}-${update.interval}`;
+      const section   = document.getElementById(sectionId);
+      if (!section) return; // section not rendered yet, ignore
+
+      const rowId       = `row-${update.stock_symbol}-${update.interval}-${update.start_time}`;
+      const existingRow = document.getElementById(rowId);
+
+      // Helper: remove the "No data available" placeholder row if present
+      function removeEmptyState() {
+        const placeholder = section.querySelector(".empty-state");
+        if (placeholder) placeholder.closest("tr").remove();
+      }
+
+      if (existingRow) {
+        // Candle already in table — update its values in place
+        removeEmptyState();
+        existingRow.className = parseFloat(update.close) >= parseFloat(update.open) ? "bullish" : "bearish";
+        const newValues = [
+          formatTime(update.start_time),
+          formatPrice(update.open),
+          formatPrice(update.high),
+          formatPrice(update.low),
+          formatPrice(update.close),
+          formatVolume(update.volume),
+        ];
+        existingRow.querySelectorAll("td").forEach((td, i) => { td.textContent = newValues[i]; });
+        flashRow(existingRow);
+        if (autoScroll) {
+          const tableWrap = existingRow.closest(".table-wrap");
+          if (tableWrap) tableWrap.scrollTop = tableWrap.scrollHeight;
+        }
+
+      } else {
+        // New candle — append a new row to the bottom of the table
+        const tbody = section.querySelector("tbody");
+        if (!tbody) return;
+        removeEmptyState();
+        const newRow = createRow(update.stock_symbol, update.interval, update);
+        tbody.appendChild(newRow);
+        flashRow(newRow);
+        if (autoScroll) {
+          const tableWrap = tbody.closest(".table-wrap");
+          if (tableWrap) tableWrap.scrollTop = tableWrap.scrollHeight;
+        }
+      }
+
+      setLastUpdated(sectionId);
+    }
+
+
+    /* ===========================================================
+       BOOT
+    =========================================================== */
+    initTheme();
+    applyAutoScroll(autoScroll);
+    setLoadBtnText("init");
+    document.getElementById("loadBtn").addEventListener("click", fetchHistoricalData);
+
+  </script>
 </body>
 </html>
