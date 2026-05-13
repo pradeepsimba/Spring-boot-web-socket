@@ -451,10 +451,9 @@
     const FROM_DATE = `${_today}T09:15:00`;
     const TO_DATE   = `${_today}T15:30:00`;
 
-    // Server addresses — same IP as page host, API on port 8000, WS on page port
-    const _host   = location.hostname;
-    const API_URL = `${location.protocol}//${_host}:8000/api/historical-data/?from_date=${FROM_DATE}&to_date=${TO_DATE}`;
-    const WS_URL  = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/historical-data`;
+    // API uses same IP as the page but on port 8000 (https); WS on same host/port as the page
+    const API_URL = `https://${location.hostname}:8000/api/historical-data/?from_date=${FROM_DATE}&to_date=${TO_DATE}`;
+    const WS_URL  = `ws://${location.host}/historical-data`;
 
     // Stocks to display — add or remove objects from this list
     // intervals: candle timeframes to show (e.g. "1m", "3m", "5m", "15m")
