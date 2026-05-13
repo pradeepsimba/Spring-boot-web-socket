@@ -645,7 +645,7 @@
         if (!res.ok) throw new Error(`Server returned HTTP ${res.status}`);
 
         const data = await res.json();
-        console.log("Historical data loaded:", data);
+        // console.log("Historical data loaded:", data);
         renderData(data);   // draw the tables
         initWebSocket();    // then open the live feed
         setLoadBtnText("reload");
