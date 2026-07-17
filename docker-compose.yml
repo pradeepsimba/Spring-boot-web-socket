@@ -6,10 +6,15 @@ services:
     container_name: ws
     ports:
       - "8083:8083"
-    environment:
-      - SPRING_DATASOURCE_URL=jdbc:postgresql://host.docker.internal:5432/algo?sessionTimezone=Asia/Kolkata
-      - SPRING_DATASOURCE_USERNAME=postgres
-      - SPRING_DATASOURCE_PASSWORD=ab45cd12
+    env_file:
+      - .env
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    mem_limit: 768m
     restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/actuator/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

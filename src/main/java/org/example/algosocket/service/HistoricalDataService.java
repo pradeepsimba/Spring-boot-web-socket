@@ -5,41 +5,35 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.algosocket.model.FilterCriteria;
 import org.example.algosocket.model.HistoricalData;
 import org.example.algosocket.repository.HistoricalDataRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
-import java.time.LocalDateTime;
 import java.util.List;
-import java.util.Objects;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 
 @Service
 public class HistoricalDataService {
 
-    private static final Logger LOGGER = Logger.getLogger(HistoricalDataService.class.getName());
+    private static final Logger LOGGER = LoggerFactory.getLogger(HistoricalDataService.class);
 
     private final HistoricalDataRepository repository;
     private final ObjectMapper objectMapper;
-    private volatile LocalDateTime lastUpdateTime;
 
     public HistoricalDataService(HistoricalDataRepository repository, ObjectMapper objectMapper) {
         this.repository = repository;
         this.objectMapper = objectMapper;
-        LocalDateTime latest = repository.findLatestUpdateTime();
-        this.lastUpdateTime = latest != null ? latest : LocalDateTime.now();
     }
 
     public String getHistoricalDataAsJson(FilterCriteria filterCriteria) {
         List<HistoricalData> data = repository.find(filterCriteria);
-        LOGGER.info("Fetched " + data.size() + " records from the database.");
-        updateLastUpdateTime(data);
+        LOGGER.info("Fetched {} records from the database.", data.size());
         return toJson(data);
     }
 
-    public String getLatestDataAsJson(FilterCriteria filterCriteria) {
-        List<HistoricalData> data = repository.findLatest(filterCriteria, lastUpdateTime);
-        LOGGER.info("Fetched " + data.size() + " new records from the database.");
-        updateLastUpdateTime(data);
+    /** Bootstraps a live-feed session with the current candle for each subscribed filter. */
+    public String getLatestPerFilterAsJson(List<FilterCriteria.FilterObject> filterObjects) {
+        List<HistoricalData> data = repository.findLatestPerFilter(filterObjects);
+        LOGGER.info("Fetched {} latest-candle records for live-feed bootstrap.", data.size());
         return toJson(data);
     }
 
@@ -47,17 +41,8 @@ public class HistoricalDataService {
         try {
             return objectMapper.writeValueAsString(data);
         } catch (JsonProcessingException e) {
-            LOGGER.log(Level.SEVERE, "Error converting data to JSON", e);
+            LOGGER.error("Error converting data to JSON", e);
             return "[]";
         }
-    }
-
-    private void updateLastUpdateTime(List<HistoricalData> data) {
-        if (data == null || data.isEmpty()) return;
-        data.stream()
-                .map(HistoricalData::getUpdatedAt)
-                .filter(Objects::nonNull)
-                .max(LocalDateTime::compareTo)
-                .ifPresent(latest -> lastUpdateTime = latest);
     }
 }
