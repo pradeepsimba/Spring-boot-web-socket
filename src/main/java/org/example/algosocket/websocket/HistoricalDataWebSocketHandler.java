@@ -151,18 +151,35 @@ public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
                 filterObjects.add(fo);
             }
         }
-        FilterCriteria filterCriteria = new FilterCriteria();
-        filterCriteria.setFilterObjects(filterObjects);
-        liveFeedFilters.put(session.getId(), filterCriteria);
-        liveFeedSessions.add(session);
 
-        if (Boolean.TRUE.equals(messageMap.get("latestOnly")) && !filterObjects.isEmpty()) {
+        if (filterObjects.isEmpty()) {
+            // Non-empty 'filters' list but nothing usable in it (non-map entries, or all fields
+            // blank). Don't register a session that could never match anything - surface an error.
+            throw new IllegalArgumentException("LIVE_FEED_INIT 'filters' contained no valid filter objects");
+        }
+
+        // Send the bootstrap snapshot BEFORE registering the session for live broadcasts. If we
+        // registered first, a live tick (fired from the PG-listener thread) could interleave with
+        // this snapshot and the client could receive a newer candle followed by the older snapshot,
+        // overwriting fresh data with stale. Snapshot-then-subscribe guarantees the client never
+        // sees a bootstrap value that's older than a live update it already applied.
+        if (Boolean.TRUE.equals(messageMap.get("latestOnly"))) {
             try {
                 send(session, historicalDataService.getLatestPerFilterAsJson(filterObjects));
             } catch (Exception e) {
                 LOGGER.warn("Failed to send live-feed bootstrap snapshot to session {}: {}",
                         session.getId(), e.getMessage());
             }
+        }
+
+        FilterCriteria filterCriteria = new FilterCriteria();
+        filterCriteria.setFilterObjects(filterObjects);
+        // put() overwrites the filter idempotently, but liveFeedSessions is a CopyOnWriteArrayList
+        // that allows duplicates - a client re-sending LIVE_FEED_INIT on the same socket would
+        // otherwise appear twice and receive every matching tick twice. Guard against that.
+        liveFeedFilters.put(session.getId(), filterCriteria);
+        if (!liveFeedSessions.contains(session)) {
+            liveFeedSessions.add(session);
         }
     }
 

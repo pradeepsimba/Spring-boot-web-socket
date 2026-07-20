@@ -74,13 +74,16 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
         return connected && triggerConfirmed;
     }
 
+    // Reset by listenOnce() the moment a connection is successfully established, so backoff only
+    // grows across consecutive failures and starts fresh after any healthy connection. (Resetting
+    // it after listenOnce() returns would be dead code: the inner loop only exits on shutdown.)
+    private volatile long backoffMs = INITIAL_BACKOFF_MS;
+
     @Override
     public void run() {
-        long backoffMs = INITIAL_BACKOFF_MS;
         while (running) {
             try {
                 listenOnce();
-                backoffMs = INITIAL_BACKOFF_MS;
             } catch (Exception e) {
                 LOGGER.warn("PostgresNotificationListener connection lost: {}", e.getMessage());
             } finally {
@@ -99,12 +102,20 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
     private void listenOnce() throws Exception {
         try (Connection conn = dataSource.getConnection()) {
             triggerConfirmed = createTriggerIfNeeded(conn);
+            if (!triggerConfirmed) {
+                // LISTEN would "succeed" but no NOTIFY could ever fire, leaving a silently-dead
+                // feed for the life of this connection. Throw instead so run() retries with
+                // backoff - a transient permission/lock failure then self-heals on a later attempt.
+                throw new IllegalStateException(
+                        "NOTIFY trigger/function could not be created; retrying via reconnect loop");
+            }
 
             PGConnection pgConn = conn.unwrap(PGConnection.class);
             try (Statement stmt = conn.createStatement()) {
                 stmt.execute("LISTEN new_historical_data");
             }
             connected = true;
+            backoffMs = INITIAL_BACKOFF_MS; // healthy connection established - reset backoff
             LOGGER.info("Started listening for PostgreSQL notifications on 'new_historical_data'.");
 
             while (running) {

@@ -84,6 +84,10 @@ public final class HistoricalDataQueryBuilder {
      * filters, for bootstrapping a live-feed session with its current candle before live updates arrive.
      */
     public static SqlQuery buildFindLatestPerFilter(List<FilterCriteria.FilterObject> filterObjects) {
+        if (filterObjects == null || filterObjects.isEmpty()) {
+            // Empty list would produce "... WHERE  ORDER BY ..." (invalid SQL); reject cleanly.
+            throw new NoFilterCriteriaException("buildFindLatestPerFilter requires at least one filter object");
+        }
         validateSize(filterObjects);
         StringBuilder sql = new StringBuilder(
                 "SELECT DISTINCT ON (h.stockname, h.stock_symbol, h.interval) h.*, i.quote, i.ltp, i.snap " +

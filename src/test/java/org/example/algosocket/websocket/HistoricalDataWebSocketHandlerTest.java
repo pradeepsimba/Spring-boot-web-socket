@@ -139,6 +139,63 @@ class HistoricalDataWebSocketHandlerTest {
         assertThat(captor.getValue().getPayload()).contains("error");
     }
 
+    @Test
+    void liveFeedInitWithNoUsableFilters_sendsErrorAndDoesNotRegister() throws Exception {
+        WebSocketSession session = mockSession("s1");
+        handler.afterConnectionEstablished(session);
+
+        // Non-empty 'filters' list, but nothing usable in it.
+        handler.handleTextMessage(session, new TextMessage("{\"type\":\"LIVE_FEED_INIT\",\"filters\":[123,\"x\"]}"));
+
+        ArgumentCaptor<TextMessage> captor = ArgumentCaptor.forClass(TextMessage.class);
+        verify(session).sendMessage(captor.capture());
+        assertThat(captor.getValue().getPayload()).contains("error");
+
+        // A subsequent broadcast must not reach this session - it was never validly registered.
+        handler.broadcastRealTimeData(sampleData("NIFTY 50", "NIFTY", "1m"));
+        verify(session, times(1)).sendMessage(any(TextMessage.class)); // only the error, no broadcast
+    }
+
+    @Test
+    void liveFeedInitWithLatestOnly_sessionNotBroadcastEligibleUntilAfterSnapshot() throws Exception {
+        // Real ordering test: the snapshot stub fires a live broadcast for a MATCHING candle while
+        // the snapshot query is "running". With the correct snapshot-then-subscribe order, the
+        // session isn't registered yet, so that broadcast reaches nobody - the session receives
+        // ONLY the snapshot (1 message). With the buggy register-then-snapshot order, the broadcast
+        // would also land, delivering a newer candle before the older snapshot (2 messages) - the
+        // exact stale-overwrite race. Asserting exactly 1 send during init distinguishes them.
+        WebSocketSession session = mockSession("s1");
+        handler.afterConnectionEstablished(session);
+        when(historicalDataService.getLatestPerFilterAsJson(any())).thenAnswer(inv -> {
+            handler.broadcastRealTimeData(sampleData("NIFTY 50", "NIFTY", "1m"));
+            return "[{\"stockname\":\"BOOT\"}]";
+        });
+
+        String json = "{\"type\":\"LIVE_FEED_INIT\",\"filters\":[{\"stockname\":\"NIFTY 50\",\"stock_symbol\":\"NIFTY\",\"interval\":\"1m\"}],\"latestOnly\":true}";
+        handler.handleTextMessage(session, new TextMessage(json));
+
+        // Only the snapshot; the concurrent broadcast must NOT have reached this session.
+        verify(session, times(1)).sendMessage(any(TextMessage.class));
+
+        // And after init completes, the session IS subscribed - a later broadcast reaches it.
+        handler.broadcastRealTimeData(sampleData("NIFTY 50", "NIFTY", "1m"));
+        verify(session, times(2)).sendMessage(any(TextMessage.class));
+    }
+
+    @Test
+    void repeatedLiveFeedInit_doesNotDeliverDuplicateBroadcasts() throws Exception {
+        // A client re-sending LIVE_FEED_INIT on the same socket must not get every tick twice.
+        WebSocketSession session = mockSession("s1");
+        handler.afterConnectionEstablished(session);
+        handler.handleTextMessage(session, liveFeedInit("NIFTY 50", "NIFTY", "1m"));
+        handler.handleTextMessage(session, liveFeedInit("NIFTY 50", "NIFTY", "1m"));
+
+        handler.broadcastRealTimeData(sampleData("NIFTY 50", "NIFTY", "1m"));
+
+        // Exactly one delivery for the single broadcast, despite two LIVE_FEED_INIT calls.
+        verify(session, times(1)).sendMessage(any(TextMessage.class));
+    }
+
     private TextMessage liveFeedInit(String stockname, String symbol, String interval) throws Exception {
         String json = String.format(
                 "{\"type\":\"LIVE_FEED_INIT\",\"filters\":[{\"stockname\":\"%s\",\"stock_symbol\":\"%s\",\"interval\":\"%s\"}]}",
