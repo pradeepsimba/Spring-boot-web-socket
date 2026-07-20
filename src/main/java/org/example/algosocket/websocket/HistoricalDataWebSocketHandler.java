@@ -37,13 +37,27 @@ public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
     private final HistoricalDataService historicalDataService;
     private final ObjectMapper objectMapper;
 
-    private final List<WebSocketSession> liveFeedSessions = new CopyOnWriteArrayList<>();
     // Live-feed subscription filters only. Kept separate from one-shot query criteria so a later
     // one-shot query on the same socket can't silently clobber (and thereby kill) the live feed.
     private final Map<String, FilterCriteria> liveFeedFilters = new ConcurrentHashMap<>();
     // Every send for a given session goes through the SAME decorator instance so concurrent sends
     // from the broadcast thread and the WebSocket container's own dispatch thread are serialized.
     private final Map<String, ConcurrentWebSocketSessionDecorator> sessionSenders = new ConcurrentHashMap<>();
+    // Reverse index: (stockname, stock_symbol, interval) -> sessions subscribed to exactly that
+    // triple. broadcastRealTimeData used to scan every live session x every one of its filters
+    // (O(sessions x filters) per tick) - with thousands of ticks/sec and dozens of sessions each
+    // with dozens of filters, that scan dominated tick-handling cost. A tick now does one map
+    // lookup instead.
+    private final Map<FilterKey, CopyOnWriteArrayList<WebSocketSession>> liveFeedIndex = new ConcurrentHashMap<>();
+
+    private record FilterKey(String stockname, String stockSymbol, String interval) {
+        static FilterKey of(FilterCriteria.FilterObject fo) {
+            return new FilterKey(fo.getStockname(), fo.getStockSymbol(), fo.getInterval());
+        }
+        static FilterKey of(HistoricalData d) {
+            return new FilterKey(d.getStockname(), d.getStockSymbol(), d.getInterval());
+        }
+    }
 
     public HistoricalDataWebSocketHandler(HistoricalDataService historicalDataService, ObjectMapper objectMapper) {
         this.historicalDataService = historicalDataService;
@@ -83,21 +97,14 @@ public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
     }
 
     public void broadcastRealTimeData(HistoricalData data) {
-        String json = null;
-        for (WebSocketSession session : liveFeedSessions) {
-            FilterCriteria filterCriteria = liveFeedFilters.get(session.getId());
-            if (filterCriteria == null || filterCriteria.getFilterObjects() == null) continue;
+        List<WebSocketSession> sessions = liveFeedIndex.get(FilterKey.of(data));
+        if (sessions == null || sessions.isEmpty()) return;
 
-            for (FilterCriteria.FilterObject fo : filterCriteria.getFilterObjects()) {
-                if (matches(data, fo)) {
-                    if (json == null) {
-                        json = serializeSingleton(data);
-                        if (json == null) return; // serialization failed; already logged
-                    }
-                    send(session, json);
-                    break;
-                }
-            }
+        String json = serializeSingleton(data);
+        if (json == null) return; // serialization failed; already logged
+
+        for (WebSocketSession session : sessions) {
+            send(session, json);
         }
     }
 
@@ -122,9 +129,43 @@ public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
     }
 
     private void evict(WebSocketSession session) {
-        liveFeedFilters.remove(session.getId());
-        liveFeedSessions.remove(session);
-        sessionSenders.remove(session.getId());
+        // synchronized(session): evict() can run on the PG-listener thread (send() failing mid-
+        // broadcast) at the same time initLiveFeed() runs on this session's own WS dispatch thread
+        // (a client re-subscribing with new filters). Without a shared lock, evict()'s
+        // removeFromIndex could run between initLiveFeed's liveFeedFilters.put() and its
+        // addToIndex() - removeFromIndex would find nothing to remove (not indexed yet under the
+        // new filter), sessionSenders.remove() would already have run, and then initLiveFeed's
+        // addToIndex would still re-insert the now-dead session into liveFeedIndex with nothing
+        // left to ever clean it up (no further message/close event fires on a dead socket).
+        // WebSocketSession is stable for the connection's lifetime, so it's a safe lock object.
+        synchronized (session) {
+            FilterCriteria previous = liveFeedFilters.remove(session.getId());
+            removeFromIndex(session, previous);
+            sessionSenders.remove(session.getId());
+        }
+    }
+
+    private void addToIndex(WebSocketSession session, List<FilterCriteria.FilterObject> filterObjects) {
+        for (FilterCriteria.FilterObject fo : filterObjects) {
+            liveFeedIndex.computeIfAbsent(FilterKey.of(fo), k -> new CopyOnWriteArrayList<>()).addIfAbsent(session);
+        }
+    }
+
+    private void removeFromIndex(WebSocketSession session, FilterCriteria previous) {
+        if (previous == null || previous.getFilterObjects() == null) return;
+        for (FilterCriteria.FilterObject fo : previous.getFilterObjects()) {
+            // computeIfPresent (not a plain get()+remove()) so removing the last session for a
+            // FilterKey also drops the map entry itself - otherwise every distinct
+            // (stockname, stockSymbol, interval) triple ever subscribed to leaves a permanent
+            // (eventually empty) CopyOnWriteArrayList behind for the life of the process. A single
+            // client repeatedly subscribing with different filter values then disconnecting is an
+            // unbounded-memory growth path with no cap (MAX_FILTER_OBJECTS only bounds one
+            // message's filter count, not the number of distinct filters ever seen).
+            liveFeedIndex.computeIfPresent(FilterKey.of(fo), (k, sessions) -> {
+                sessions.remove(session);
+                return sessions.isEmpty() ? null : sessions;
+            });
+        }
     }
 
     private void initLiveFeed(WebSocketSession session, Map<String, Object> messageMap) {
@@ -174,20 +215,25 @@ public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
 
         FilterCriteria filterCriteria = new FilterCriteria();
         filterCriteria.setFilterObjects(filterObjects);
-        // put() overwrites the filter idempotently, but liveFeedSessions is a CopyOnWriteArrayList
-        // that allows duplicates - a client re-sending LIVE_FEED_INIT on the same socket would
-        // otherwise appear twice and receive every matching tick twice. Guard against that.
-        liveFeedFilters.put(session.getId(), filterCriteria);
-        if (!liveFeedSessions.contains(session)) {
-            liveFeedSessions.add(session);
+        // synchronized(session), matching evict(): without it, an eviction triggered by an
+        // unrelated broadcast's send() failure (on the PG-listener thread) could interleave with
+        // this swap and get re-registered into liveFeedIndex a moment later with nothing left to
+        // ever clean it up (see evict()'s comment). The sessionSenders check inside the lock closes
+        // the remaining gap even for evictions that complete just BEFORE this block acquires the
+        // lock (not just ones interleaved during it): if the session's already gone, don't
+        // resurrect it - a message that arrived just as the connection died is already stale.
+        synchronized (session) {
+            if (!sessionSenders.containsKey(session.getId())) {
+                return;
+            }
+            // A client re-sending LIVE_FEED_INIT on the same socket replaces its filters rather
+            // than adding to them - remove the old index entries (using the filters actually
+            // indexed under, not whatever the client sends this time) before indexing the new
+            // ones, or a re-subscribe with a different filter set would leave the session
+            // receiving ticks for both the old and new filters forever.
+            FilterCriteria previous = liveFeedFilters.put(session.getId(), filterCriteria);
+            removeFromIndex(session, previous);
+            addToIndex(session, filterObjects);
         }
-    }
-
-    private boolean matches(HistoricalData data, FilterCriteria.FilterObject fo) {
-        // Columns are nullable in the schema; an NPE here would abort the whole broadcast loop
-        // (see broadcastRealTimeData), silently starving every session later in iteration order.
-        return java.util.Objects.equals(data.getStockname(), fo.getStockname())
-                && java.util.Objects.equals(data.getStockSymbol(), fo.getStockSymbol())
-                && java.util.Objects.equals(data.getInterval(), fo.getInterval());
     }
 }

@@ -32,7 +32,11 @@ class HistoricalDataQueryBuilderTest {
                 .contains("AND h.start_time >= ?")
                 .contains("AND h.start_time <= ?")
                 .contains("AND h.stockname IN (?,?)")
-                .contains("LIMIT " + HistoricalDataQueryBuilder.MAX_RESULTS);
+                .contains("LIMIT " + HistoricalDataQueryBuilder.MAX_RESULTS)
+                // Regression guard: historical rows must NOT join app_info's always-current
+                // quote/ltp/snap - that would attach today's live quote to old candle rows.
+                .contains("NULL::text AS quote")
+                .doesNotContain("LEFT JOIN app_info");
         assertThat(query.params()).containsExactly(from, to, "NIFTY 50", "TCS");
     }
 
@@ -47,10 +51,12 @@ class HistoricalDataQueryBuilderTest {
 
         SqlQuery query = HistoricalDataQueryBuilder.buildFind(criteria);
 
-        assertThat(query.sql()).isEqualTo(HistoricalDataQueryBuilder.BASE_SELECT
-                + " WHERE (h.stockname = ? AND h.stock_symbol = ? AND h.interval = ?)"
-                + " OR (h.stockname = ? AND h.stock_symbol = ? AND h.interval = ?)"
-                + " ORDER BY h.start_time DESC LIMIT " + HistoricalDataQueryBuilder.MAX_RESULTS);
+        assertThat(query.sql())
+                .contains("WHERE (h.stockname = ? AND h.stock_symbol = ? AND h.interval = ?)"
+                        + " OR (h.stockname = ? AND h.stock_symbol = ? AND h.interval = ?)")
+                .contains("ORDER BY h.start_time DESC LIMIT " + HistoricalDataQueryBuilder.MAX_RESULTS)
+                .contains("NULL::text AS quote", "NULL::text AS ltp", "NULL::text AS snap")
+                .doesNotContain("LEFT JOIN app_info");
         assertThat(query.params()).containsExactly("NIFTY 50", "NIFTY", "1m", "TCS", "TCS", "5m");
     }
 
@@ -67,7 +73,10 @@ class HistoricalDataQueryBuilderTest {
                 .contains("SELECT DISTINCT ON (h.stockname, h.stock_symbol, h.interval)")
                 .contains("(h.stockname = ? AND h.stock_symbol = ? AND h.interval = ?)"
                         + " OR (h.stockname = ? AND h.stock_symbol = ? AND h.interval = ?)")
-                .contains("ORDER BY h.stockname, h.stock_symbol, h.interval, h.start_time DESC");
+                .contains("ORDER BY h.stockname, h.stock_symbol, h.interval, h.start_time DESC")
+                // Unlike buildFind: this path IS "give me the current state", so the current-value
+                // app_info join is correct here and must be preserved.
+                .contains("LEFT JOIN app_info i ON h.info_id = i.id");
         assertThat(query.params()).containsExactly("NIFTY 50", "NIFTY", "1m", "TCS", "TCS", "5m");
     }
 

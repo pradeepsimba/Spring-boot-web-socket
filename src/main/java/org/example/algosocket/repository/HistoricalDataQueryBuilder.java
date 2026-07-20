@@ -12,8 +12,28 @@ import java.util.List;
  */
 public final class HistoricalDataQueryBuilder {
 
+    /**
+     * Joins app_info for its CURRENT quote/ltp/snap values - correct only when the candle row IS
+     * "now": PostgresNotificationListener's live-broadcast fetch (a row that was just inserted/
+     * updated) and buildFindLatestPerFilter below (explicitly "the current candle"). Reused by
+     * PostgresNotificationListener.FETCH_BY_IDS_SQL_PREFIX - do not repurpose for historical
+     * queries; see HISTORICAL_SELECT for why.
+     */
     public static final String BASE_SELECT =
             "SELECT h.*, i.quote, i.ltp, i.snap FROM app_historical_data h LEFT JOIN app_info i ON h.info_id = i.id";
+
+    /**
+     * For genuinely historical queries (buildFind/buildFindByFilterObjects, i.e. the one-shot
+     * "historical data" query path, as opposed to the live feed). app_info holds only the LATEST
+     * quote/ltp/snap for a stock - joining it here would attach TODAY's live quote to a candle row
+     * from weeks ago, which is wrong, not just imprecise. Point-in-time snapshots do exist now in
+     * app_info_history, but a correct join against it needs 3 correlated LATERAL subqueries per row
+     * and no current caller consumes these fields on this path - so return null rather than either
+     * silently-wrong or speculatively-expensive data. Revisit if a caller actually needs point-in-
+     * time quote/ltp/snap attached to historical rows.
+     */
+    private static final String HISTORICAL_SELECT =
+            "SELECT h.*, NULL::text AS quote, NULL::text AS ltp, NULL::text AS snap FROM app_historical_data h";
 
     /** Bounds any single filter list so a client can't force construction of a huge OR/IN SQL clause. */
     public static final int MAX_FILTER_LIST_SIZE = 200;
@@ -60,7 +80,7 @@ public final class HistoricalDataQueryBuilder {
                     "At least one of filterObjects, fromTime/toTime, stockNames, stockSymbols, or intervals is required");
         }
 
-        StringBuilder sql = new StringBuilder(BASE_SELECT).append(" WHERE 1=1");
+        StringBuilder sql = new StringBuilder(HISTORICAL_SELECT).append(" WHERE 1=1");
         List<Object> params = new ArrayList<>();
 
         if (criteria.getFromTime() != null) {
@@ -99,7 +119,7 @@ public final class HistoricalDataQueryBuilder {
     }
 
     private static SqlQuery buildFindByFilterObjects(List<FilterCriteria.FilterObject> filterObjects) {
-        StringBuilder sql = new StringBuilder(BASE_SELECT).append(" WHERE ");
+        StringBuilder sql = new StringBuilder(HISTORICAL_SELECT).append(" WHERE ");
         List<Object> params = new ArrayList<>();
         appendFilterObjectDisjunction(sql, params, filterObjects);
         // No time bound here either - a bare (stockname, symbol, interval) match against a

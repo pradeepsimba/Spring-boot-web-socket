@@ -14,4 +14,11 @@ COPY --from=build /home/gradle/src/build/libs/*.jar app.jar
 RUN chown app:app app.jar
 USER app
 EXPOSE 8083
-ENTRYPOINT ["java", "-jar", "app.jar"]
+# Without -XX:MaxRAMPercentage, the JVM sizes its default heap off the HOST's memory (visible
+# through /proc/meminfo even inside a cgroup-limited container on older JDKs/runtimes), not the
+# container's actual memory limit - reliably OOM-killed the moment the heap grows past whatever
+# the container was actually capped at. The shell form (not exec-array JSON) is required so
+# $JAVA_OPTS actually expands; `exec` then replaces the shell so SIGTERM still reaches the JVM
+# directly instead of the shell absorbing it and the JVM never noticing.
+ENV JAVA_OPTS="-XX:MaxRAMPercentage=75.0"
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar app.jar"]

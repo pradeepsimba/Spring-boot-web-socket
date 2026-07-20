@@ -14,6 +14,11 @@ import org.springframework.web.socket.server.standard.ServletServerContainerFact
 public class WebSocketConfig implements WebSocketConfigurer {
 
     private static final int MAX_TEXT_MESSAGE_SIZE_BYTES = 64 * 1024;
+    // A session that goes dark without a clean TCP close (client sleeps, Wi-Fi drops, a NAT/
+    // firewall silently drops the connection) has no timeout without this and stays registered in
+    // sessionSenders/liveFeedIndex until the next send attempt happens to fail - which, for a
+    // low-traffic filter, could be minutes to hours after the client is actually gone.
+    private static final long IDLE_TIMEOUT_MS = 10 * 60 * 1000L;
 
     private final HistoricalDataWebSocketHandler historicalDataWebSocketHandler;
     private final String[] allowedOrigins;
@@ -34,6 +39,7 @@ public class WebSocketConfig implements WebSocketConfigurer {
         ServletServerContainerFactoryBean container = new ServletServerContainerFactoryBean();
         container.setMaxTextMessageBufferSize(MAX_TEXT_MESSAGE_SIZE_BYTES);
         container.setMaxBinaryMessageBufferSize(MAX_TEXT_MESSAGE_SIZE_BYTES);
+        container.setMaxSessionIdleTimeout(IDLE_TIMEOUT_MS);
         return container;
     }
 }

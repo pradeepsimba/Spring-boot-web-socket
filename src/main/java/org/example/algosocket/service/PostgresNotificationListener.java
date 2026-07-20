@@ -7,6 +7,7 @@ import org.postgresql.PGConnection;
 import org.postgresql.PGNotification;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationListener;
 import org.springframework.context.event.ContextRefreshedEvent;
 import org.springframework.stereotype.Service;
@@ -17,6 +18,8 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.time.Duration;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -35,10 +38,23 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
     private final HistoricalDataWebSocketHandler webSocketHandler;
     private final DataSource dataSource;
 
+    // Same bound as spring.jdbc.template.query-timeout, reused here because fetchAndBroadcast uses
+    // a raw JDBC PreparedStatement rather than the auto-configured JdbcTemplate that property binds
+    // to - without setting it explicitly on this statement too, a stuck fetch (lock contention, a
+    // long-running competing write) has no timeout at all and stalls this single-threaded listen
+    // loop indefinitely, silently starving every notification behind it.
+    @Value("${spring.jdbc.template.query-timeout:10}")
+    private int queryTimeoutSeconds;
+
     private Thread listenerThread;
     private volatile boolean running = true;
     private volatile boolean connected = false;
     private volatile boolean triggerConfirmed = false;
+    // Once the trigger/function have been confirmed present on ANY connection, skip re-running the
+    // DDL on every subsequent reconnect - a transient network blip used to re-execute
+    // CREATE OR REPLACE FUNCTION (invalidating dependent plan caches) and the trigger-existence
+    // check/create on every single reconnect, not just at startup.
+    private volatile boolean triggerEverConfirmed = false;
 
     public PostgresNotificationListener(HistoricalDataWebSocketHandler webSocketHandler, DataSource dataSource) {
         this.webSocketHandler = webSocketHandler;
@@ -51,6 +67,14 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
     }
 
     public void start() {
+        // ContextRefreshedEvent is documented to fire once per context refresh - normally exactly
+        // once - but guard against a second listener thread ever running concurrently (some
+        // Actuator/DevTools restart paths, multi-context setups) rather than assume it. Two live
+        // listeners would double-broadcast every tick and double the trigger-creation race below.
+        if (listenerThread != null && listenerThread.isAlive()) {
+            LOGGER.warn("start() called while a listener thread is already running - ignoring.");
+            return;
+        }
         listenerThread = new Thread(this, "PG-Notification-Listener");
         listenerThread.setDaemon(true);
         listenerThread.start();
@@ -61,6 +85,15 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
         running = false;
         if (listenerThread != null) {
             listenerThread.interrupt();
+            // Without joining, @PreDestroy could return - and the Spring context (and its
+            // DataSource) start tearing down - while this thread is still mid-listenOnce(), racing
+            // a connection close against the DataSource shutting down under it. Bounded so a thread
+            // stuck in a slow query doesn't hang application shutdown indefinitely.
+            try {
+                listenerThread.join(2_000);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 
@@ -101,8 +134,10 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
 
     private void listenOnce() throws Exception {
         try (Connection conn = dataSource.getConnection()) {
-            triggerConfirmed = createTriggerIfNeeded(conn);
-            if (!triggerConfirmed) {
+            triggerConfirmed = triggerEverConfirmed || createTriggerIfNeeded(conn);
+            if (triggerConfirmed) {
+                triggerEverConfirmed = true;
+            } else {
                 // LISTEN would "succeed" but no NOTIFY could ever fire, leaving a silently-dead
                 // feed for the life of this connection. Throw instead so run() retries with
                 // backoff - a transient permission/lock failure then self-heals on a later attempt.
@@ -139,17 +174,37 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
         }
     }
 
+    /** Above this, a batch's fetch-and-broadcast lag is logged at WARN instead of DEBUG. */
+    private static final long LAG_WARN_THRESHOLD_MS = 5_000;
+
     private void fetchAndBroadcast(Connection conn, List<Long> ids) {
         String placeholders = String.join(",", Collections.nCopies(ids.size(), "?"));
         String sql = FETCH_BY_IDS_SQL_PREFIX + placeholders + ")";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setQueryTimeout(queryTimeoutSeconds);
             for (int i = 0; i < ids.size(); i++) {
                 ps.setLong(i + 1, ids.get(i));
             }
+            long maxLagMs = 0;
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
-                    webSocketHandler.broadcastRealTimeData(HistoricalDataRowMapper.mapRow(rs));
+                    var data = HistoricalDataRowMapper.mapRow(rs);
+                    // updated_at is stamped by the writer at insert/update time, so
+                    // now - updated_at approximates end-to-end lag (write -> NOTIFY -> this fetch)
+                    // - the metric that matters for "is the live feed keeping up", not just how long
+                    // this one query took.
+                    if (data.getUpdatedAt() != null) {
+                        long lagMs = Duration.between(data.getUpdatedAt(), LocalDateTime.now()).toMillis();
+                        if (lagMs > maxLagMs) maxLagMs = lagMs;
+                    }
+                    webSocketHandler.broadcastRealTimeData(data);
                 }
+            }
+            if (maxLagMs > LAG_WARN_THRESHOLD_MS) {
+                LOGGER.warn("Notification-to-broadcast lag reached {} ms for a batch of {} row(s) - " +
+                        "the live feed may be falling behind.", maxLagMs, ids.size());
+            } else {
+                LOGGER.debug("Notification-to-broadcast lag: {} ms for a batch of {} row(s).", maxLagMs, ids.size());
             }
         } catch (Exception e) {
             LOGGER.warn("Error fetching/broadcasting new data for ids {}: {}", ids, e.getMessage());
@@ -186,7 +241,16 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
                     IF NOT EXISTS (
                         SELECT 1 FROM pg_trigger WHERE tgname = 'app_historical_data_notify'
                     ) THEN
-                        EXECUTE 'CREATE TRIGGER app_historical_data_notify AFTER INSERT OR UPDATE ON app_historical_data FOR EACH ROW EXECUTE FUNCTION notify_new_historical_data();';
+                        BEGIN
+                            EXECUTE 'CREATE TRIGGER app_historical_data_notify AFTER INSERT OR UPDATE ON app_historical_data FOR EACH ROW EXECUTE FUNCTION notify_new_historical_data();';
+                        EXCEPTION WHEN duplicate_object THEN
+                            -- Another instance's connection won the race and created it between
+                            -- our existence check above and this CREATE (e.g. two pods starting up
+                            -- at once, or even this same app racing a fast reconnect) - the trigger
+                            -- exists either way, so treat this exactly like the IF branch not
+                            -- firing at all instead of surfacing it as a failure.
+                            NULL;
+                        END;
                     END IF;
                 END$$;
                 """);

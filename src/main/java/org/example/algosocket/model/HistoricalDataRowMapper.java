@@ -3,7 +3,13 @@ package org.example.algosocket.model;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 
-/** Shared row mapping for the `app_historical_data JOIN app_info` result shape used by both the repository and the live-notification listener. */
+/**
+ * Shared row mapping for app_historical_data, used by both the repository and the live-notification
+ * listener. Works against either query shape HistoricalDataQueryBuilder produces: rows either carry
+ * real quote/ltp/snap values from a LEFT JOIN app_info (live/bootstrap paths), or NULL literals in
+ * their place (general historical queries, where app_info's current-only values don't apply) -
+ * ResultSet.getString reads by column label either way, so no special-casing is needed here.
+ */
 public final class HistoricalDataRowMapper {
 
     private HistoricalDataRowMapper() {

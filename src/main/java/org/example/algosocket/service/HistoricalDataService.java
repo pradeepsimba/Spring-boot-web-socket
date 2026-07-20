@@ -26,14 +26,14 @@ public class HistoricalDataService {
 
     public String getHistoricalDataAsJson(FilterCriteria filterCriteria) {
         List<HistoricalData> data = repository.find(filterCriteria);
-        LOGGER.info("Fetched {} records from the database.", data.size());
+        LOGGER.debug("Fetched {} records from the database.", data.size());
         return toJson(data);
     }
 
     /** Bootstraps a live-feed session with the current candle for each subscribed filter. */
     public String getLatestPerFilterAsJson(List<FilterCriteria.FilterObject> filterObjects) {
         List<HistoricalData> data = repository.findLatestPerFilter(filterObjects);
-        LOGGER.info("Fetched {} latest-candle records for live-feed bootstrap.", data.size());
+        LOGGER.debug("Fetched {} latest-candle records for live-feed bootstrap.", data.size());
         return toJson(data);
     }
 
