@@ -3,15 +3,18 @@ package org.example.algosocket.service;
 import org.example.algosocket.model.HistoricalDataRowMapper;
 import org.example.algosocket.repository.HistoricalDataQueryBuilder;
 import org.example.algosocket.websocket.HistoricalDataWebSocketHandler;
+import org.example.algosocket.model.HistoricalData;
 import org.postgresql.PGConnection;
 import org.postgresql.PGNotification;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationListener;
 import org.springframework.context.event.ContextRefreshedEvent;
 import org.springframework.stereotype.Service;
 
+import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import javax.sql.DataSource;
 import java.sql.Connection;
@@ -22,9 +25,13 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 @Service
 public class PostgresNotificationListener implements Runnable, ApplicationListener<ContextRefreshedEvent> {
@@ -38,6 +45,9 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
     private static final long NOTIFICATION_POLL_TIMEOUT_MS = 1_000;
 
     private final HistoricalDataWebSocketHandler webSocketHandler;
+    // The live-feed-dedicated pool (see LiveFeedDataSourceConfig) - NOT the main spring.datasource
+    // pool JdbcTemplate uses. Supplies both this listener's one permanent LISTEN connection and
+    // every parallel fetch worker's own borrowed connection (see fetchChunk).
     private final DataSource dataSource;
 
     // Same bound as spring.jdbc.template.query-timeout, reused here because fetchAndBroadcast uses
@@ -47,6 +57,22 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
     // loop indefinitely, silently starving every notification behind it.
     @Value("${spring.jdbc.template.query-timeout:10}")
     private int queryTimeoutSeconds;
+
+    // How many chunks of one NOTIFY batch may be fetched from Postgres concurrently. The DB round
+    // trip used to be this pipeline's serial bottleneck: one chunk's query had to fully return
+    // before the next chunk's query could even start, even though the chunks are independent reads
+    // with no ordering requirement between each other (ordering only matters once results are
+    // broadcast - see fetchAndBroadcast's sort). Must stay below the live-feed pool size, which
+    // reserves one slot for this listener's own permanent LISTEN connection.
+    @Value("${livefeed.fetch-parallelism:4}")
+    private int fetchParallelism;
+
+    private ExecutorService fetchExecutor;
+
+    @PostConstruct
+    public void initFetchExecutor() {
+        fetchExecutor = Executors.newFixedThreadPool(Math.max(1, fetchParallelism));
+    }
 
     private Thread listenerThread;
     private volatile boolean running = true;
@@ -58,7 +84,8 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
     // check/create on every single reconnect, not just at startup.
     private volatile boolean triggerEverConfirmed = false;
 
-    public PostgresNotificationListener(HistoricalDataWebSocketHandler webSocketHandler, DataSource dataSource) {
+    public PostgresNotificationListener(HistoricalDataWebSocketHandler webSocketHandler,
+                                         @Qualifier("liveFeedDataSource") DataSource dataSource) {
         this.webSocketHandler = webSocketHandler;
         this.dataSource = dataSource;
     }
@@ -96,6 +123,9 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
             } catch (InterruptedException ignored) {
                 Thread.currentThread().interrupt();
             }
+        }
+        if (fetchExecutor != null) {
+            fetchExecutor.shutdown();
         }
     }
 
@@ -184,7 +214,7 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
                 }
                 if (ids.isEmpty()) continue;
 
-                fetchAndBroadcast(conn, new ArrayList<>(ids));
+                fetchAndBroadcast(new ArrayList<>(ids));
             }
         }
     }
@@ -200,44 +230,83 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
     // regardless of burst size, at the cost of a few more round trips for a big burst.
     private static final int MAX_FETCH_BATCH_SIZE = 500;
 
-    private void fetchAndBroadcast(Connection conn, List<Long> ids) {
+    private void fetchAndBroadcast(List<Long> ids) {
+        List<List<Long>> chunks = new ArrayList<>();
         for (int start = 0; start < ids.size(); start += MAX_FETCH_BATCH_SIZE) {
-            List<Long> chunk = ids.subList(start, Math.min(start + MAX_FETCH_BATCH_SIZE, ids.size()));
-            fetchAndBroadcastChunk(conn, chunk);
+            chunks.add(ids.subList(start, Math.min(start + MAX_FETCH_BATCH_SIZE, ids.size())));
+        }
+
+        // Fetch every chunk concurrently (each on its own borrowed connection - see fetchChunk).
+        // The DB round trip used to be this pipeline's serial bottleneck: one chunk's query had to
+        // fully return before the next chunk's query could even start, even though the chunks are
+        // independent reads with no ordering requirement between each other.
+        List<CompletableFuture<List<HistoricalData>>> futures = new ArrayList<>(chunks.size());
+        for (List<Long> chunk : chunks) {
+            futures.add(CompletableFuture.supplyAsync(() -> fetchChunk(chunk), fetchExecutor));
+        }
+
+        List<HistoricalData> rows = new ArrayList<>(ids.size());
+        for (CompletableFuture<List<HistoricalData>> future : futures) {
+            try {
+                rows.addAll(future.join());
+            } catch (Exception e) {
+                LOGGER.warn("Error fetching a chunk of live data: {}", e.getMessage());
+            }
+        }
+
+        // Fetching out of order is fine; broadcasting out of order is not. Two rows sharing the
+        // same (stockname, stock_symbol, interval) - e.g. an old candle closing and a new one
+        // opening at the same interval boundary, which happens for every actively-ticking combo at
+        // every minute mark - must always reach a subscribed client in the order they actually
+        // happened. Sorting by id (insertion order) before broadcasting guarantees that regardless
+        // of which chunk's fetch happened to finish first.
+        rows.sort(Comparator.comparingLong(HistoricalData::getId));
+
+        long maxLagMs = 0;
+        for (HistoricalData data : rows) {
+            // updated_at is stamped by the writer at insert/update time, so now - updated_at
+            // approximates end-to-end lag (write -> NOTIFY -> this fetch) - the metric that matters
+            // for "is the live feed keeping up", not just how long this one query took.
+            if (data.getUpdatedAt() != null) {
+                long lagMs = Duration.between(data.getUpdatedAt(), LocalDateTime.now()).toMillis();
+                if (lagMs > maxLagMs) maxLagMs = lagMs;
+            }
+            webSocketHandler.broadcastRealTimeData(data);
+        }
+
+        if (maxLagMs > LAG_WARN_THRESHOLD_MS) {
+            LOGGER.warn("Notification-to-broadcast lag reached {} ms for a batch of {} row(s) - " +
+                    "the live feed may be falling behind.", maxLagMs, ids.size());
+        } else {
+            LOGGER.debug("Notification-to-broadcast lag: {} ms for a batch of {} row(s).", maxLagMs, ids.size());
         }
     }
 
-    private void fetchAndBroadcastChunk(Connection conn, List<Long> ids) {
+    /**
+     * Fetches one chunk on its own connection, borrowed from the live-feed pool - deliberately NOT
+     * this listener's dedicated LISTEN connection, which must stay free to keep polling
+     * notifications, and which a single JDBC Connection couldn't safely serve to concurrently
+     * running fetch workers anyway.
+     */
+    private List<HistoricalData> fetchChunk(List<Long> ids) {
         String placeholders = String.join(",", Collections.nCopies(ids.size(), "?"));
         String sql = FETCH_BY_IDS_SQL_PREFIX + placeholders + ")";
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setQueryTimeout(queryTimeoutSeconds);
             for (int i = 0; i < ids.size(); i++) {
                 ps.setLong(i + 1, ids.get(i));
             }
-            long maxLagMs = 0;
+            List<HistoricalData> result = new ArrayList<>(ids.size());
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
-                    var data = HistoricalDataRowMapper.mapRow(rs);
-                    // updated_at is stamped by the writer at insert/update time, so
-                    // now - updated_at approximates end-to-end lag (write -> NOTIFY -> this fetch)
-                    // - the metric that matters for "is the live feed keeping up", not just how long
-                    // this one query took.
-                    if (data.getUpdatedAt() != null) {
-                        long lagMs = Duration.between(data.getUpdatedAt(), LocalDateTime.now()).toMillis();
-                        if (lagMs > maxLagMs) maxLagMs = lagMs;
-                    }
-                    webSocketHandler.broadcastRealTimeData(data);
+                    result.add(HistoricalDataRowMapper.mapRow(rs));
                 }
             }
-            if (maxLagMs > LAG_WARN_THRESHOLD_MS) {
-                LOGGER.warn("Notification-to-broadcast lag reached {} ms for a batch of {} row(s) - " +
-                        "the live feed may be falling behind.", maxLagMs, ids.size());
-            } else {
-                LOGGER.debug("Notification-to-broadcast lag: {} ms for a batch of {} row(s).", maxLagMs, ids.size());
-            }
+            return result;
         } catch (Exception e) {
-            LOGGER.warn("Error fetching/broadcasting new data for ids {}: {}", ids, e.getMessage());
+            LOGGER.warn("Error fetching live data for ids {}: {}", ids, e.getMessage());
+            return List.of();
         }
     }
 

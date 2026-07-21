@@ -6,6 +6,8 @@ import org.example.algosocket.model.HistoricalData;
 import org.example.algosocket.service.HistoricalDataService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
@@ -68,14 +70,23 @@ public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
     // single-thread bounded-queue executors (mirrors AngelOne_parallel_server's wsExecutors
     // sharding pattern) - EVERY session's sends always land on the SAME executor, so ordering
     // within one session's live feed is preserved, while different sessions run on different
-    // threads so one stuck session can only ever block the (at most 1/BROADCAST_PARALLELISM)
-    // share of sessions hashed to the same executor, never the listener thread itself.
-    private static final int BROADCAST_PARALLELISM = Math.max(2, Runtime.getRuntime().availableProcessors());
+    // threads so one stuck session can only ever block the (at most 1/broadcastParallelism) share
+    // of sessions hashed to the same executor, never the listener thread itself.
+    //
+    // Deliberately NOT tied to CPU core count: a send is I/O-bound (waiting on a client's socket),
+    // not CPU-bound, so running more lanes than cores costs idle threads, not CPU - and a higher
+    // count shrinks the fraction of sessions any one stuck/slow client can affect. Configurable
+    // (websocket.broadcast-parallelism) with a fixed default rather than Runtime.availableProcessors(),
+    // so a small VM with few cores doesn't end up with a needlessly small lane count.
+    private static final int DEFAULT_BROADCAST_PARALLELISM = 16;
     private static final int BROADCAST_QUEUE_CAPACITY = 5_000;
     private final AtomicLong droppedBroadcasts = new AtomicLong();
-    private final ExecutorService[] broadcastExecutors = new ExecutorService[BROADCAST_PARALLELISM];
-    {
-        for (int i = 0; i < BROADCAST_PARALLELISM; i++) {
+    private final int broadcastParallelism;
+    private final ExecutorService[] broadcastExecutors;
+
+    private ExecutorService[] buildBroadcastExecutors(int parallelism) {
+        ExecutorService[] executors = new ExecutorService[parallelism];
+        for (int i = 0; i < parallelism; i++) {
             ThreadPoolExecutor executor = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
                     new LinkedBlockingQueue<>(BROADCAST_QUEUE_CAPACITY));
             executor.setRejectedExecutionHandler((task, exec) -> {
@@ -84,8 +95,9 @@ public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
                     LOGGER.warn("Broadcast executor queue full; dropped {} sends so far.", dropped);
                 }
             });
-            broadcastExecutors[i] = executor;
+            executors[i] = executor;
         }
+        return executors;
     }
 
     @PreDestroy
@@ -96,7 +108,7 @@ public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
     }
 
     private void submitSend(WebSocketSession session, String payload) {
-        int idx = Math.floorMod(session.getId().hashCode(), BROADCAST_PARALLELISM);
+        int idx = Math.floorMod(session.getId().hashCode(), broadcastExecutors.length);
         broadcastExecutors[idx].execute(() -> send(session, payload));
     }
 
@@ -121,9 +133,19 @@ public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
         }
     }
 
+    // Convenience overload (tests, manual construction) - same default the @Value-driven
+    // constructor below falls back to when the property isn't set.
     public HistoricalDataWebSocketHandler(HistoricalDataService historicalDataService, ObjectMapper objectMapper) {
+        this(historicalDataService, objectMapper, DEFAULT_BROADCAST_PARALLELISM);
+    }
+
+    @Autowired
+    public HistoricalDataWebSocketHandler(HistoricalDataService historicalDataService, ObjectMapper objectMapper,
+                                           @Value("${websocket.broadcast-parallelism:16}") int broadcastParallelism) {
         this.historicalDataService = historicalDataService;
         this.objectMapper = objectMapper;
+        this.broadcastParallelism = Math.max(2, broadcastParallelism);
+        this.broadcastExecutors = buildBroadcastExecutors(this.broadcastParallelism);
     }
 
     @Override

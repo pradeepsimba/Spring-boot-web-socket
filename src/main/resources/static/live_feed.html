@@ -228,6 +228,82 @@
 
 
     /* ===========================================================
+       STOCK INPUT FORM  (add stocks/intervals before loading data)
+    =========================================================== */
+    .stock-form {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .form-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+    }
+    .stock-form input[type="text"] {
+      flex: 1;
+      min-width: 160px;
+      min-height: 40px;
+      padding: 0 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 0.85rem;
+    }
+    .stock-form input[type="text"]:focus {
+      outline: none;
+      border-color: #4caf5088;
+    }
+    .intervals-row { font-size: 0.8rem; color: var(--text-muted); }
+    .form-label { font-size: 0.8rem; color: var(--text-sub); font-weight: 600; }
+    .intervals-row label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+    #addStockBtn {
+      padding: 0 16px;
+      min-height: 40px;
+      background: none;
+      border: 1px solid #4caf5066;
+      border-radius: 6px;
+      color: #4caf50;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    #addStockBtn:hover { background: var(--badge-bg); }
+    .pending-stocks {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .stock-chip {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--bg-card-header);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 6px 8px 6px 12px;
+      font-size: 0.78rem;
+      color: var(--text);
+    }
+    .stock-chip button {
+      background: none;
+      border: none;
+      color: var(--text-dim);
+      cursor: pointer;
+      font-size: 0.9rem;
+      line-height: 1;
+      padding: 2px 4px;
+    }
+    .stock-chip button:hover { color: var(--error-text); }
+
+
+    /* ===========================================================
        ERROR MESSAGE
     =========================================================== */
     #errorMsg {
@@ -436,6 +512,27 @@
   </header>
 
   <main>
+    <div id="stockForm" class="stock-form">
+      <div class="form-row">
+        <input type="text" id="inputStockname" placeholder="Stock name (e.g. Kotak Bank)">
+        <input type="text" id="inputStockSymbol" placeholder="Stock symbol (e.g. KOTAKBANK)">
+      </div>
+      <div class="form-row intervals-row">
+        <span class="form-label">Intervals:</span>
+        <label><input type="checkbox" value="1m" checked> 1m</label>
+        <label><input type="checkbox" value="3m" checked> 3m</label>
+        <label><input type="checkbox" value="5m" checked> 5m</label>
+        <label><input type="checkbox" value="15m"> 15m</label>
+        <label><input type="checkbox" value="30m"> 30m</label>
+        <label><input type="checkbox" value="60m"> 60m</label>
+        <label><input type="checkbox" value="1d"> 1d</label>
+      </div>
+      <div class="form-row">
+        <button id="addStockBtn" type="button">+ Add Stock</button>
+      </div>
+      <div id="pendingStocks" class="pending-stocks"></div>
+    </div>
+
     <div id="errorMsg"></div>
     <div id="dataContainer"></div>
   </main>
@@ -455,12 +552,11 @@
     const API_URL = `https://${location.hostname}:8000/api/historical-data/?from_date=${FROM_DATE}&to_date=${TO_DATE}`;
     const WS_URL  = `ws://${location.host}/historical-data`;
 
-    // Stocks to display — add or remove objects from this list
-    // intervals: candle timeframes to show (e.g. "1m", "3m", "5m", "15m")
-    const STOCKS = [
-      { stockname: "NIFTY 50",            stock_symbol: "99926000", intervals: ["1m", "3m", "5m"] },
-      { stockname: "KOTAK MAHINDRA BANK", stock_symbol: "1922",     intervals: ["1m", "3m", "5m"] },
-    ];
+    // Stocks to display — populated from the input form below (see addStock()), not hardcoded.
+    // stock_symbol must match app_historical_data.stock_symbol exactly (case-insensitive) - that's
+    // the trading symbol (e.g. "KOTAKBANK"), NOT the numeric exchange/symbol token used for broker
+    // API calls. stockname must match app_historical_data.stockname exactly too (e.g. "Kotak Bank").
+    let STOCKS = [];
 
 
     /* ===========================================================
@@ -502,11 +598,6 @@
     /* ===========================================================
        INTERNAL SETUP  (no need to edit below this line)
     =========================================================== */
-
-    // Build the WebSocket subscription list from STOCKS automatically
-    const WS_FILTERS = STOCKS.flatMap(({ stock_symbol, stockname, intervals }) =>
-      intervals.map(interval => ({ stock_symbol, stockname, interval }))
-    );
 
     let socket = null;
     let reconnectDelay = 1000; // starts at 1s, doubles on each failed retry (max 30s)
@@ -626,10 +717,80 @@
 
 
     /* ===========================================================
+       STOCK INPUT FORM  (add/remove stocks before loading data)
+    =========================================================== */
+
+    function renderPendingStocks() {
+      const container = document.getElementById("pendingStocks");
+      container.innerHTML = "";
+      STOCKS.forEach((stock, index) => {
+        const chip = document.createElement("div");
+        chip.className = "stock-chip";
+        chip.innerHTML = `
+          <span>${stock.stockname} (${stock.stock_symbol}) — ${stock.intervals.join(", ")}</span>
+          <button type="button" aria-label="Remove">×</button>
+        `;
+        chip.querySelector("button").addEventListener("click", () => removeStock(index));
+        container.appendChild(chip);
+      });
+    }
+
+    function removeStock(index) {
+      STOCKS.splice(index, 1);
+      renderPendingStocks();
+    }
+
+    function addStock() {
+      const stocknameInput = document.getElementById("inputStockname");
+      const stockSymbolInput = document.getElementById("inputStockSymbol");
+      const stockname = stocknameInput.value.trim();
+      const stockSymbol = stockSymbolInput.value.trim();
+      const intervals = Array.from(document.querySelectorAll("#stockForm .intervals-row input:checked"))
+        .map(cb => cb.value);
+
+      if (!stockname || !stockSymbol) {
+        showError("Enter both a stock name and a stock symbol before adding.");
+        return;
+      }
+      if (intervals.length === 0) {
+        showError("Select at least one interval before adding.");
+        return;
+      }
+      showError("");
+
+      // Merge into an existing entry for the same stock instead of pushing a duplicate - two
+      // entries with the same stock_symbol would make renderData() create two DOM elements with
+      // the same id (card.id, section.id are both built from stock_symbol), and
+      // getElementById always resolves to the first one, so live updates would silently never
+      // reach the second card at all.
+      const existing = STOCKS.find(s =>
+          s.stockname.toUpperCase() === stockname.toUpperCase()
+          && s.stock_symbol.toUpperCase() === stockSymbol.toUpperCase());
+      if (existing) {
+        existing.intervals = Array.from(new Set([...existing.intervals, ...intervals]));
+      } else {
+        STOCKS.push({ stockname, stock_symbol: stockSymbol, intervals });
+      }
+      renderPendingStocks();
+
+      stocknameInput.value = "";
+      stockSymbolInput.value = "";
+      stocknameInput.focus();
+    }
+
+    document.getElementById("addStockBtn").addEventListener("click", addStock);
+
+
+    /* ===========================================================
        FETCH HISTORICAL DATA
     =========================================================== */
 
     async function fetchHistoricalData() {
+      if (STOCKS.length === 0) {
+        showError("Add at least one stock before loading data.");
+        return;
+      }
+
       const btn = document.getElementById("loadBtn");
       btn.disabled = true;
       setLoadBtnText("loading");
@@ -753,10 +914,18 @@
         setWsStatus("connected");
         reconnectDelay = 1000; // reset backoff on successful connection
 
+        // Built fresh from STOCKS at connect time, not once at page load - STOCKS starts empty
+        // and only gets filled in by addStock() after the user submits the form, so computing
+        // this once up front (the old hardcoded-STOCKS version's approach) would always send an
+        // empty filter list.
+        const wsFilters = STOCKS.flatMap(({ stock_symbol, stockname, intervals }) =>
+          intervals.map(interval => ({ stock_symbol, stockname, interval }))
+        );
+
         // Tell the server which stocks + intervals we want
         socket.send(JSON.stringify({
           type: "LIVE_FEED_INIT",
-          filters: WS_FILTERS,
+          filters: wsFilters,
           latestOnly: true, // server sends only the current (latest) candle
         }));
       };
@@ -841,6 +1010,7 @@
     initTheme();
     applyAutoScroll(autoScroll);
     setLoadBtnText("init");
+    renderPendingStocks();
     document.getElementById("loadBtn").addEventListener("click", fetchHistoricalData);
 
   </script>
