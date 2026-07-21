@@ -22,7 +22,9 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 @Service
 public class PostgresNotificationListener implements Runnable, ApplicationListener<ContextRefreshedEvent> {
@@ -157,7 +159,20 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
                 PGNotification[] notifications = pgConn.getNotifications((int) NOTIFICATION_POLL_TIMEOUT_MS);
                 if (notifications == null || notifications.length == 0) continue;
 
-                List<Long> ids = new ArrayList<>(notifications.length);
+                // LinkedHashSet, not a List: the NOTIFY trigger fires on every INSERT OR UPDATE, and
+                // a single in-progress candle gets updated repeatedly as ticks arrive within its
+                // interval window - same row id, many notifications, all within the same 1s poll.
+                // A re-SELECT always returns that row's CURRENT state regardless of which duplicate
+                // triggered it, so processing the same id more than once here is pure waste - not
+                // just inefficient but the actual cause of unbounded lag growth under real trading
+                // volume: with hundreds of actively-ticking (stock, interval) combos each firing
+                // multiple redundant NOTIFYs per second, the un-deduplicated id list can run into
+                // the thousands per poll, and this loop must fully drain the current poll's ids
+                // before it can call getNotifications() again - so a growing backlog compounds
+                // instead of draining, and every extra second of lag is extra staleness the
+                // eventual broadcast delivers to clients (or, if a client already disconnected by
+                // then, just work for nobody).
+                Set<Long> ids = new LinkedHashSet<>(notifications.length);
                 for (PGNotification notification : notifications) {
                     String payload = notification.getParameter();
                     LOGGER.debug("Received NOTIFY: {}", payload);
@@ -169,7 +184,7 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
                 }
                 if (ids.isEmpty()) continue;
 
-                fetchAndBroadcast(conn, ids);
+                fetchAndBroadcast(conn, new ArrayList<>(ids));
             }
         }
     }
