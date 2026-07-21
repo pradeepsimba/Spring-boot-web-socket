@@ -354,6 +354,37 @@
 
 
     /* ===========================================================
+       LIVE INFO PANEL  (quote / ltp / snap from app_info)
+    =========================================================== */
+    .stock-info-panel {
+      margin: 0 20px 16px;
+      padding: 12px 16px;
+      background: var(--bg-th);
+      border: 1px solid var(--border-cell);
+      border-radius: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .info-row { display: flex; flex-direction: column; gap: 2px; }
+    .info-label {
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+    }
+    .info-value {
+      font-family: 'Consolas', 'Courier New', monospace;
+      font-size: 0.78rem;
+      color: var(--text);
+      white-space: pre-line; /* preserves the \n line breaks inside "snap" */
+      word-break: break-word;
+    }
+    .info-value.empty { color: var(--empty-text); font-family: inherit; font-style: italic; }
+
+
+    /* ===========================================================
        INTERVAL SECTION  (one per candle timeframe: 1M, 3M, 5M…)
     =========================================================== */
     .interval-section { padding-top: 16px; }
@@ -548,8 +579,10 @@
     const FROM_DATE = `${_today}T09:15:00`;
     const TO_DATE   = `${_today}T15:30:00`;
 
-    // API uses same IP as the page but on port 8000 (https); WS on same host/port as the page
-    const API_URL = `https://${location.hostname}:8000/api/historical-data/?from_date=${FROM_DATE}&to_date=${TO_DATE}`;
+    // API uses same IP as the page but on port 8000 (https); WS on same host/port as the page.
+    // include_info=true attaches each candle's current quote/ltp/snap (from app_info) - opt-in
+    // server-side since it costs an extra query per stock/interval otherwise skipped by default.
+    const API_URL = `https://${location.hostname}:8000/api/historical-data/?from_date=${FROM_DATE}&to_date=${TO_DATE}&include_info=true`;
     const WS_URL  = `ws://${location.host}/historical-data`;
 
     // Stocks to display — populated from the input form below (see addStock()), not hardcoded.
@@ -715,6 +748,59 @@
       if (el) el.textContent = "Updated " + new Date().toLocaleTimeString();
     }
 
+    // Escapes text before it goes into innerHTML - quote/ltp/snap are raw server-provided text
+    // (order-book dumps, symbols, etc.), not markup, so this prevents both broken rendering and
+    // HTML/script injection if any of that text ever contained special characters.
+    function escapeHtml(str) {
+      const div = document.createElement("div");
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
+
+    /* ===========================================================
+       LIVE INFO PANEL  (quote / ltp / snap)
+    =========================================================== */
+
+    // Builds the quote/ltp/snap HTML for one stock's info panel. Falls back to an explanatory
+    // empty state rather than showing nothing, since the most common reason these are blank is a
+    // missing include_info=true on the historical fetch, not a real absence of data.
+    function renderInfoRows(info) {
+      const fields = [
+        ["Quote", info && info.quote],
+        ["LTP",   info && info.ltp],
+        ["Snapshot", info && info.snap],
+      ];
+      return fields.map(([label, value]) => `
+        <div class="info-row">
+          <span class="info-label">${label}</span>
+          <span class="info-value${value ? "" : " empty"}">${
+            value ? escapeHtml(value) : "Not available yet (needs include_info=true and a live tick)"
+          }</span>
+        </div>
+      `).join("");
+    }
+
+    // quote/ltp/snap are the SAME current value on every row of a stock (LEFT JOIN app_info, not
+    // per-candle data) - any row that has one is as good as any other, so just take the first hit
+    // across whichever intervals were requested.
+    function findLatestInfo(stock) {
+      for (const interval of stock.intervals) {
+        const rows = stock[`${interval} data`] || [];
+        const withInfo = rows.find(r => r.quote || r.ltp || r.snap);
+        if (withInfo) return withInfo;
+      }
+      return null;
+    }
+
+    function buildInfoPanel(stock) {
+      const panel = document.createElement("div");
+      panel.className = "stock-info-panel";
+      panel.id = `info-${stock.stock_symbol}`;
+      panel.innerHTML = renderInfoRows(findLatestInfo(stock));
+      return panel;
+    }
+
 
     /* ===========================================================
        STOCK INPUT FORM  (add/remove stocks before loading data)
@@ -842,6 +928,7 @@
           <span class="stock-badge">${stock.stock_symbol}</span>
         `;
         card.appendChild(cardHeader);
+        card.appendChild(buildInfoPanel(stock));
 
         // --- Interval sections (one table per timeframe) ---
         const wrapper = document.createElement("div");
@@ -1001,6 +1088,14 @@
       }
 
       setLastUpdated(sectionId);
+
+      // Live ticks carry the current quote/ltp/snap too (see PostgresNotificationListener's
+      // fetch) - refresh the stock's info panel so it doesn't stay frozen at whatever the
+      // historical bootstrap fetch happened to return.
+      if (update.quote || update.ltp || update.snap) {
+        const panel = document.getElementById(`info-${update.stock_symbol}`);
+        if (panel) panel.innerHTML = renderInfoRows(update);
+      }
     }
 
 
