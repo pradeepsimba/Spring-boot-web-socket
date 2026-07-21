@@ -177,7 +177,22 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
     /** Above this, a batch's fetch-and-broadcast lag is logged at WARN instead of DEBUG. */
     private static final long LAG_WARN_THRESHOLD_MS = 5_000;
 
+    // Caps the IN-clause size of any single fetch query. Unlike client-supplied filters (bounded
+    // via MAX_FILTER_LIST_SIZE/MAX_FILTER_OBJECTS), the number of ids pulled out of one
+    // getNotifications() poll has no cap of its own - a burst (a bulk backfill, a reconnect-
+    // triggered replay hitting the trigger, a busy trading session) could hand this an arbitrarily
+    // large list, building one very large single query. Chunking bounds worst-case query size
+    // regardless of burst size, at the cost of a few more round trips for a big burst.
+    private static final int MAX_FETCH_BATCH_SIZE = 500;
+
     private void fetchAndBroadcast(Connection conn, List<Long> ids) {
+        for (int start = 0; start < ids.size(); start += MAX_FETCH_BATCH_SIZE) {
+            List<Long> chunk = ids.subList(start, Math.min(start + MAX_FETCH_BATCH_SIZE, ids.size()));
+            fetchAndBroadcastChunk(conn, chunk);
+        }
+    }
+
+    private void fetchAndBroadcastChunk(Connection conn, List<Long> ids) {
         String placeholders = String.join(",", Collections.nCopies(ids.size(), "?"));
         String sql = FETCH_BY_IDS_SQL_PREFIX + placeholders + ")";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {

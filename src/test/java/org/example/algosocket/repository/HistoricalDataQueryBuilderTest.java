@@ -31,7 +31,9 @@ class HistoricalDataQueryBuilderTest {
         assertThat(query.sql())
                 .contains("AND h.start_time >= ?")
                 .contains("AND h.start_time <= ?")
-                .contains("AND h.stockname IN (?,?)")
+                // stockname/stock_symbol are matched case-insensitively (UPPER() on both sides) to
+                // mirror the Django backend's __iexact convention for these two columns.
+                .contains("AND UPPER(h.stockname) IN (UPPER(?),UPPER(?))")
                 .contains("LIMIT " + HistoricalDataQueryBuilder.MAX_RESULTS)
                 // Regression guard: historical rows must NOT join app_info's always-current
                 // quote/ltp/snap - that would attach today's live quote to old candle rows.
@@ -52,8 +54,10 @@ class HistoricalDataQueryBuilderTest {
         SqlQuery query = HistoricalDataQueryBuilder.buildFind(criteria);
 
         assertThat(query.sql())
-                .contains("WHERE (h.stockname = ? AND h.stock_symbol = ? AND h.interval = ?)"
-                        + " OR (h.stockname = ? AND h.stock_symbol = ? AND h.interval = ?)")
+                // stockname/stock_symbol case-insensitive (UPPER() both sides); interval stays
+                // exact - see appendFilterObjectDisjunction's comment.
+                .contains("WHERE (UPPER(h.stockname) = UPPER(?) AND UPPER(h.stock_symbol) = UPPER(?) AND h.interval = ?)"
+                        + " OR (UPPER(h.stockname) = UPPER(?) AND UPPER(h.stock_symbol) = UPPER(?) AND h.interval = ?)")
                 .contains("ORDER BY h.start_time DESC LIMIT " + HistoricalDataQueryBuilder.MAX_RESULTS)
                 .contains("NULL::text AS quote", "NULL::text AS ltp", "NULL::text AS snap")
                 .doesNotContain("LEFT JOIN app_info");
@@ -71,8 +75,8 @@ class HistoricalDataQueryBuilderTest {
 
         assertThat(query.sql())
                 .contains("SELECT DISTINCT ON (h.stockname, h.stock_symbol, h.interval)")
-                .contains("(h.stockname = ? AND h.stock_symbol = ? AND h.interval = ?)"
-                        + " OR (h.stockname = ? AND h.stock_symbol = ? AND h.interval = ?)")
+                .contains("(UPPER(h.stockname) = UPPER(?) AND UPPER(h.stock_symbol) = UPPER(?) AND h.interval = ?)"
+                        + " OR (UPPER(h.stockname) = UPPER(?) AND UPPER(h.stock_symbol) = UPPER(?) AND h.interval = ?)")
                 .contains("ORDER BY h.stockname, h.stock_symbol, h.interval, h.start_time DESC")
                 // Unlike buildFind: this path IS "give me the current state", so the current-value
                 // app_info join is correct here and must be preserved.

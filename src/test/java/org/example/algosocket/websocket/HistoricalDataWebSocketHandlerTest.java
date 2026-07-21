@@ -58,7 +58,10 @@ class HistoricalDataWebSocketHandlerTest {
 
         handler.broadcastRealTimeData(sampleData("NIFTY 50", "NIFTY", "1m"));
 
-        verify(matching, times(1)).sendMessage(any(TextMessage.class));
+        // Broadcasts are dispatched to a background executor now (see submitSend) rather than sent
+        // synchronously on this thread - timeout() polls instead of asserting instantly, since the
+        // send may not have run yet the moment broadcastRealTimeData() returns.
+        verify(matching, timeout(1000).times(1)).sendMessage(any(TextMessage.class));
         verify(nonMatching, never()).sendMessage(any(TextMessage.class));
     }
 
@@ -97,7 +100,8 @@ class HistoricalDataWebSocketHandlerTest {
         verify(historicalDataService).getHistoricalDataAsJson(criteriaCaptor.capture());
         assertThat(criteriaCaptor.getValue().getStockNames()).containsExactly("NIFTY 50");
 
-        verify(session, times(2)).sendMessage(any(TextMessage.class)); // one-shot reply + live broadcast
+        // one-shot reply (synchronous) + live broadcast (dispatched async - see submitSend)
+        verify(session, timeout(1000).times(2)).sendMessage(any(TextMessage.class));
     }
 
     @Test
@@ -174,12 +178,16 @@ class HistoricalDataWebSocketHandlerTest {
         String json = "{\"type\":\"LIVE_FEED_INIT\",\"filters\":[{\"stockname\":\"NIFTY 50\",\"stock_symbol\":\"NIFTY\",\"interval\":\"1m\"}],\"latestOnly\":true}";
         handler.handleTextMessage(session, new TextMessage(json));
 
-        // Only the snapshot; the concurrent broadcast must NOT have reached this session.
+        // Only the snapshot; the concurrent broadcast must NOT have reached this session. Not
+        // racy despite async dispatch: the session isn't in liveFeedIndex yet at this point, so
+        // broadcastRealTimeData's lookup finds nothing to schedule at all - there's no pending
+        // async task to wait for here, so an immediate verify is correct.
         verify(session, times(1)).sendMessage(any(TextMessage.class));
 
-        // And after init completes, the session IS subscribed - a later broadcast reaches it.
+        // And after init completes, the session IS subscribed - a later broadcast reaches it,
+        // dispatched async (see submitSend) - timeout() polls for it.
         handler.broadcastRealTimeData(sampleData("NIFTY 50", "NIFTY", "1m"));
-        verify(session, times(2)).sendMessage(any(TextMessage.class));
+        verify(session, timeout(1000).times(2)).sendMessage(any(TextMessage.class));
     }
 
     @Test
@@ -193,7 +201,8 @@ class HistoricalDataWebSocketHandlerTest {
         handler.broadcastRealTimeData(sampleData("NIFTY 50", "NIFTY", "1m"));
 
         // Exactly one delivery for the single broadcast, despite two LIVE_FEED_INIT calls.
-        verify(session, times(1)).sendMessage(any(TextMessage.class));
+        // Dispatched async (see submitSend) - timeout() polls for it.
+        verify(session, timeout(1000).times(1)).sendMessage(any(TextMessage.class));
     }
 
     private TextMessage liveFeedInit(String stockname, String symbol, String interval) throws Exception {

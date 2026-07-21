@@ -91,8 +91,11 @@ public final class HistoricalDataQueryBuilder {
             sql.append(" AND h.start_time <= ?");
             params.add(criteria.getToTime());
         }
-        appendInClause(sql, params, "h.stockname", criteria.getStockNames());
-        appendInClause(sql, params, "h.stock_symbol", criteria.getStockSymbols());
+        appendInClauseCaseInsensitive(sql, params, "h.stockname", criteria.getStockNames());
+        appendInClauseCaseInsensitive(sql, params, "h.stock_symbol", criteria.getStockSymbols());
+        // interval stays exact/case-sensitive, matching Django's own get_historical_data (which
+        // filters interval= directly, not __iexact - interval values are fixed lowercase tokens
+        // like "1m"/"5m"/"1d", never user-typed with varying case).
         appendInClause(sql, params, "h.interval", criteria.getIntervals());
         sql.append(" ORDER BY h.start_time DESC LIMIT ").append(MAX_RESULTS);
 
@@ -130,9 +133,17 @@ public final class HistoricalDataQueryBuilder {
 
     private static void appendFilterObjectDisjunction(StringBuilder sql, List<Object> params,
                                                        List<FilterCriteria.FilterObject> filterObjects) {
+        // stockname/stock_symbol compared via UPPER() on both sides - the Django backend's
+        // get_historical_data filters these two with __iexact (case-insensitive) and even has a
+        // purpose-built expression index for exactly this predicate shape
+        // (app_histori_upper_covering_idx, on UPPER(stockname), UPPER(stock_symbol), interval,
+        // start_time - see backend_server_algo/app/models.py). Without matching that convention
+        // here, a client using the same mixed-case values the Django API explicitly supports (its
+        // own docstring example is "hdfc bank") gets zero results here and never receives any live
+        // ticks for that filter, silently. interval stays exact - see the comment on buildFind.
         for (int i = 0; i < filterObjects.size(); i++) {
             if (i > 0) sql.append(" OR ");
-            sql.append("(h.stockname = ? AND h.stock_symbol = ? AND h.interval = ?)");
+            sql.append("(UPPER(h.stockname) = UPPER(?) AND UPPER(h.stock_symbol) = UPPER(?) AND h.interval = ?)");
             FilterCriteria.FilterObject fo = filterObjects.get(i);
             params.add(fo.getStockname());
             params.add(fo.getStockSymbol());
@@ -144,6 +155,15 @@ public final class HistoricalDataQueryBuilder {
         if (values == null || values.isEmpty()) return;
         String placeholders = String.join(",", Collections.nCopies(values.size(), "?"));
         sql.append(" AND ").append(column).append(" IN (").append(placeholders).append(")");
+        params.addAll(values);
+    }
+
+    /** Same as {@link #appendInClause}, but for columns compared case-insensitively (see
+     * appendFilterObjectDisjunction's comment for why stockname/stock_symbol need this). */
+    private static void appendInClauseCaseInsensitive(StringBuilder sql, List<Object> params, String column, List<String> values) {
+        if (values == null || values.isEmpty()) return;
+        String placeholders = String.join(",", Collections.nCopies(values.size(), "UPPER(?)"));
+        sql.append(" AND UPPER(").append(column).append(") IN (").append(placeholders).append(")");
         params.addAll(values);
     }
 

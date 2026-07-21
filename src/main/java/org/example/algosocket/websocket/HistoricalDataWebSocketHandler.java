@@ -21,6 +21,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+
+import jakarta.annotation.PreDestroy;
 
 @Component
 public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
@@ -50,12 +57,67 @@ public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
     // lookup instead.
     private final Map<FilterKey, CopyOnWriteArrayList<WebSocketSession>> liveFeedIndex = new ConcurrentHashMap<>();
 
+    // broadcastRealTimeData runs on PostgresNotificationListener's single dedicated listener
+    // thread. ConcurrentWebSocketSessionDecorator's SEND_TIME_LIMIT_MS only aborts a send that
+    // OVERLAPS a second concurrent send to the SAME session - a lone blocking write (a dead TCP
+    // peer that stopped ACKing: sleeping laptop, dropped Wi-Fi, a slow-reading client) has nothing
+    // to race against and can block for however long the OS/TCP stack allows, often minutes. While
+    // blocked, this was the ONE thread that drains Postgres NOTIFYs - every other live session,
+    // regardless of filter, stopped receiving ticks for as long as that one client stayed stuck.
+    // Sends are dispatched here instead, hash-partitioned by session id across a fixed pool of
+    // single-thread bounded-queue executors (mirrors AngelOne_parallel_server's wsExecutors
+    // sharding pattern) - EVERY session's sends always land on the SAME executor, so ordering
+    // within one session's live feed is preserved, while different sessions run on different
+    // threads so one stuck session can only ever block the (at most 1/BROADCAST_PARALLELISM)
+    // share of sessions hashed to the same executor, never the listener thread itself.
+    private static final int BROADCAST_PARALLELISM = Math.max(2, Runtime.getRuntime().availableProcessors());
+    private static final int BROADCAST_QUEUE_CAPACITY = 5_000;
+    private final AtomicLong droppedBroadcasts = new AtomicLong();
+    private final ExecutorService[] broadcastExecutors = new ExecutorService[BROADCAST_PARALLELISM];
+    {
+        for (int i = 0; i < BROADCAST_PARALLELISM; i++) {
+            ThreadPoolExecutor executor = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
+                    new LinkedBlockingQueue<>(BROADCAST_QUEUE_CAPACITY));
+            executor.setRejectedExecutionHandler((task, exec) -> {
+                long dropped = droppedBroadcasts.incrementAndGet();
+                if (dropped % 1000 == 1) {
+                    LOGGER.warn("Broadcast executor queue full; dropped {} sends so far.", dropped);
+                }
+            });
+            broadcastExecutors[i] = executor;
+        }
+    }
+
+    @PreDestroy
+    public void shutdownBroadcastExecutors() {
+        for (ExecutorService executor : broadcastExecutors) {
+            executor.shutdown();
+        }
+    }
+
+    private void submitSend(WebSocketSession session, String payload) {
+        int idx = Math.floorMod(session.getId().hashCode(), BROADCAST_PARALLELISM);
+        broadcastExecutors[idx].execute(() -> send(session, payload));
+    }
+
     private record FilterKey(String stockname, String stockSymbol, String interval) {
+        // stockname/stock_symbol normalized to uppercase on both sides of this key (client filter
+        // AND broadcast data) so a client subscribing with different casing than what's actually
+        // stored still matches - mirrors the Django backend's get_historical_data, which filters
+        // these two case-insensitively (__iexact) and has a purpose-built expression index for it
+        // (app_histori_upper_covering_idx). Without this, a client using the same mixed-case
+        // values the Django API's own docstring example uses ("hdfc bank") would never receive any
+        // live ticks for that filter, silently - no error, just permanent non-delivery. interval
+        // stays as-is: it's a fixed lowercase token ("1m"/"5m"/"1d"), never user-typed with varying
+        // case, matching Django's own exact (non-iexact) interval filter.
+        private static String normalize(String s) {
+            return s == null ? null : s.toUpperCase(java.util.Locale.ROOT);
+        }
         static FilterKey of(FilterCriteria.FilterObject fo) {
-            return new FilterKey(fo.getStockname(), fo.getStockSymbol(), fo.getInterval());
+            return new FilterKey(normalize(fo.getStockname()), normalize(fo.getStockSymbol()), fo.getInterval());
         }
         static FilterKey of(HistoricalData d) {
-            return new FilterKey(d.getStockname(), d.getStockSymbol(), d.getInterval());
+            return new FilterKey(normalize(d.getStockname()), normalize(d.getStockSymbol()), d.getInterval());
         }
     }
 
@@ -104,7 +166,7 @@ public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
         if (json == null) return; // serialization failed; already logged
 
         for (WebSocketSession session : sessions) {
-            send(session, json);
+            submitSend(session, json);
         }
     }
 
