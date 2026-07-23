@@ -17,9 +17,18 @@ public class LiveFeedHealthIndicator implements HealthIndicator {
 
     @Override
     public Health health() {
-        if (listener.isConnected()) {
-            return Health.up().withDetail("liveFeedListener", "connected").build();
-        }
-        return Health.down().withDetail("liveFeedListener", "disconnected, reconnecting").build();
+        // Two independent failure modes, both against the live-feed pool: the permanent LISTEN
+        // connection (isConnected) and the separate fetch-worker path (isFetchHealthy) that borrows
+        // its own connections from the same pool. A NOTIFY batch that repeatedly fails to fetch
+        // would previously leave this indicator reporting UP as long as the LISTEN connection alone
+        // was fine, even though every client subscribed to the affected rows was silently getting
+        // no updates at all.
+        boolean listenerUp = listener.isConnected();
+        boolean fetchUp    = listener.isFetchHealthy();
+        Health.Builder builder = (listenerUp && fetchUp) ? Health.up() : Health.down();
+        return builder
+                .withDetail("liveFeedListener", listenerUp ? "connected" : "disconnected, reconnecting")
+                .withDetail("liveFeedFetch", fetchUp ? "healthy" : "repeated fetch failures")
+                .build();
     }
 }

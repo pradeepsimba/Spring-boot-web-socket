@@ -36,8 +36,19 @@ public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(HistoricalDataWebSocketHandler.class);
 
-    /** Bounds the per-session filter list so a misbehaving client can't inflate broadcast scan cost. */
-    private static final int MAX_FILTER_OBJECTS = 50;
+    /**
+     * Bounds the per-session filter list. Originally justified as "so a misbehaving client can't
+     * inflate broadcast scan cost" - that scan is gone now (broadcastRealTimeData does an O(1)
+     * liveFeedIndex lookup, not a scan of every session's filters), so this is now purely a
+     * per-connection subscription-count cap. Raised from 50 to support a ~10,000-stock universe
+     * with a manageable connection count: at 50, covering 10,000 stocks needs ~750 concurrent
+     * WebSocket connections from one client (see manoranjan-stratergy's _MAX_SYMBOLS_PER_WS, which
+     * MUST stay paired with this value); at 300 that drops to ~125. Kept well under the whole
+     * universe in one connection so a single connection drop only ever affects this many symbols'
+     * live feed during its reconnect gap, not all 10,000 - still a real tradeoff, revisit with load
+     * data if per-connection tick volume against SEND_BUFFER_SIZE_LIMIT_BYTES becomes a problem.
+     */
+    private static final int MAX_FILTER_OBJECTS = 300;
 
     /** Guards a session from a slow/stalled consumer: max time a send may block, and max buffered bytes. */
     private static final int SEND_TIME_LIMIT_MS = 10_000;

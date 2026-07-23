@@ -126,6 +126,20 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
         }
         if (fetchExecutor != null) {
             fetchExecutor.shutdown();
+            // Without awaiting, this method (and therefore @PreDestroy) could return while a
+            // fetchChunk task is still mid-executeQuery() on a connection borrowed from
+            // liveFeedDataSource - Spring's destroy-order guarantee covers bean destroy() calls,
+            // not background threads a bean spawned, so the live-feed pool could be closed by the
+            // container right out from under that still-running query. Bounded so a stuck fetch
+            // can't hang shutdown indefinitely.
+            try {
+                if (!fetchExecutor.awaitTermination(2, java.util.concurrent.TimeUnit.SECONDS)) {
+                    fetchExecutor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                fetchExecutor.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
         }
     }
 
@@ -303,11 +317,27 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
                     result.add(HistoricalDataRowMapper.mapRow(rs));
                 }
             }
+            consecutiveFetchFailures.set(0);
             return result;
         } catch (Exception e) {
+            // This borrows from the SAME liveFeedDataSource pool the LISTEN connection uses but is
+            // otherwise invisible to isConnected() - a pool exhausted/stuck here would silently
+            // drop every NOTIFY batch it touches while the health check kept reporting UP (the
+            // LISTEN connection is a different pool slot with different failure characteristics).
+            // Tracked so LiveFeedHealthIndicator can surface this failure mode too.
+            consecutiveFetchFailures.incrementAndGet();
             LOGGER.warn("Error fetching live data for ids {}: {}", ids, e.getMessage());
             return List.of();
         }
+    }
+
+    /** Above this many consecutive fetchChunk failures, the fetch path is reported unhealthy. */
+    private static final int FETCH_FAILURE_HEALTH_THRESHOLD = 3;
+    private final java.util.concurrent.atomic.AtomicInteger consecutiveFetchFailures = new java.util.concurrent.atomic.AtomicInteger();
+
+    /** @return true unless the fetch path (separate from the LISTEN connection) has been failing repeatedly. */
+    public boolean isFetchHealthy() {
+        return consecutiveFetchFailures.get() < FETCH_FAILURE_HEALTH_THRESHOLD;
     }
 
     /**

@@ -35,8 +35,16 @@ public final class HistoricalDataQueryBuilder {
     private static final String HISTORICAL_SELECT =
             "SELECT h.*, NULL::text AS quote, NULL::text AS ltp, NULL::text AS snap FROM app_historical_data h";
 
-    /** Bounds any single filter list so a client can't force construction of a huge OR/IN SQL clause. */
-    public static final int MAX_FILTER_LIST_SIZE = 200;
+    /**
+     * Bounds any single filter list so a client can't force construction of a huge OR/IN SQL
+     * clause. Kept in sync with HistoricalDataWebSocketHandler.MAX_FILTER_OBJECTS: that cap gates
+     * how many filters a live-feed session may subscribe to, but buildFindLatestPerFilter (the
+     * live-feed bootstrap snapshot) validates against THIS constant - if it were lower than
+     * MAX_FILTER_OBJECTS, a session subscribing with the maximum allowed filter count would pass
+     * the WebSocket-level check and then silently fail (a caught, logged exception) to get its
+     * initial snapshot, only to start receiving live ticks with no bootstrap state.
+     */
+    public static final int MAX_FILTER_LIST_SIZE = 300;
 
     /**
      * Hard cap applied to every non-filterObjects query, regardless of which criteria were given -
