@@ -21,12 +21,15 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 
 import jakarta.annotation.PreDestroy;
@@ -95,6 +98,20 @@ public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
     private final int broadcastParallelism;
     private final ExecutorService[] broadcastExecutors;
 
+    // One-shot queries (the "else" branch of handleTextMessage) used to run the DB query directly
+    // on the WebSocket container's own dispatch thread. Unlike the broadcast path above, that
+    // thread pool is shared across every session's incoming frames (not one dedicated thread per
+    // session) - a single slow client's one-shot query blocked that thread for the query's full
+    // duration, which could delay OTHER sessions' frames (including their own LIVE_FEED_INIT
+    // messages) if the container's shared pool was small/saturated. Isolated onto its own bounded
+    // pool with a timeout so a slow query only ever costs this session, never the dispatch pool.
+    private static final int QUERY_EXECUTOR_THREADS = 4;
+    private static final int QUERY_QUEUE_CAPACITY = 200;
+    private static final long QUERY_TIMEOUT_MS = 15_000;
+    private final ExecutorService queryExecutor = new ThreadPoolExecutor(
+            QUERY_EXECUTOR_THREADS, QUERY_EXECUTOR_THREADS, 0L, TimeUnit.MILLISECONDS,
+            new LinkedBlockingQueue<>(QUERY_QUEUE_CAPACITY));
+
     private ExecutorService[] buildBroadcastExecutors(int parallelism) {
         ExecutorService[] executors = new ExecutorService[parallelism];
         for (int i = 0; i < parallelism; i++) {
@@ -113,8 +130,31 @@ public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
 
     @PreDestroy
     public void shutdownBroadcastExecutors() {
+        // shutdown() alone only stops accepting NEW tasks - it doesn't wait for in-flight ones.
+        // Spring's destroy-order guarantee covers bean destroy() calls, not background threads a
+        // bean spawned (same reasoning as PostgresNotificationListener.stop()'s awaitTermination),
+        // so without waiting here a broadcastExecutor worker can still be mid-blocking
+        // sendMessage(), or a queryExecutor worker mid-DB-query, when this method returns and the
+        // container proceeds to tear down the DataSource/JdbcTemplate beans out from under it.
+        // Bounded so a stuck send/query can't hang shutdown indefinitely.
         for (ExecutorService executor : broadcastExecutors) {
             executor.shutdown();
+        }
+        queryExecutor.shutdown();
+        for (ExecutorService executor : broadcastExecutors) {
+            awaitOrForceShutdown(executor);
+        }
+        awaitOrForceShutdown(queryExecutor);
+    }
+
+    private static void awaitOrForceShutdown(ExecutorService executor) {
+        try {
+            if (!executor.awaitTermination(2, TimeUnit.SECONDS)) {
+                executor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            executor.shutdownNow();
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -176,12 +216,33 @@ public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
                 initLiveFeed(session, messageMap);
             } else {
                 FilterCriteria filterCriteria = objectMapper.readValue(message.getPayload(), FilterCriteria.class);
-                String historicalDataJson = historicalDataService.getHistoricalDataAsJson(filterCriteria);
-                send(session, historicalDataJson);
+                runOneShotQuery(session, filterCriteria);
             }
         } catch (Exception e) {
             LOGGER.warn("Failed to process message from session {}: {}", session.getId(), e.getMessage());
             send(session, "{\"error\":\"invalid_request\"}");
+        }
+    }
+
+    private void runOneShotQuery(WebSocketSession session, FilterCriteria filterCriteria) {
+        try {
+            CompletableFuture
+                    .supplyAsync(() -> historicalDataService.getHistoricalDataAsJson(filterCriteria), queryExecutor)
+                    .orTimeout(QUERY_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                    .whenCompleteAsync((json, ex) -> {
+                        if (ex == null) {
+                            send(session, json);
+                        } else if (ex instanceof TimeoutException) {
+                            LOGGER.warn("One-shot query timed out for session {}", session.getId());
+                            send(session, "{\"error\":\"query_timeout\"}");
+                        } else {
+                            LOGGER.warn("One-shot query failed for session {}: {}", session.getId(), ex.getMessage());
+                            send(session, "{\"error\":\"query_failed\"}");
+                        }
+                    }, queryExecutor);
+        } catch (RejectedExecutionException e) {
+            LOGGER.warn("Query executor queue full; rejecting one-shot query for session {}", session.getId());
+            send(session, "{\"error\":\"server_busy\"}");
         }
     }
 
@@ -284,6 +345,17 @@ public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
                 if (filterMap.get("stockname") != null) fo.setStockname(filterMap.get("stockname").toString());
                 if (filterMap.get("stock_symbol") != null) fo.setStockSymbol(filterMap.get("stock_symbol").toString());
                 if (filterMap.get("interval") != null) fo.setInterval(filterMap.get("interval").toString());
+                // FilterKey.of() (used for both this session's registration and every broadcast
+                // match) requires stockname+stockSymbol+interval ALL present - a real DB row never
+                // has any of the three null. A filter object missing one (e.g. {} or {"interval":
+                // "5m"} with no stockname/stock_symbol) can therefore never match anything; the
+                // old code let it through as long as the outer 'filters' LIST was non-empty,
+                // silently registering a session that would never receive a single tick.
+                if (fo.getStockname() == null || fo.getStockSymbol() == null || fo.getInterval() == null) {
+                    LOGGER.warn("Session {} sent an incomplete filter object (missing stockname/stock_symbol/"
+                            + "interval); skipping it: {}", session.getId(), filterMap);
+                    continue;
+                }
                 filterObjects.add(fo);
             }
         }
@@ -294,12 +366,31 @@ public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
             throw new IllegalArgumentException("LIVE_FEED_INIT 'filters' contained no valid filter objects");
         }
 
+        boolean latestOnly = Boolean.TRUE.equals(messageMap.get("latestOnly"));
+        // The DB query (when latestOnly) + registration below used to run directly on the shared
+        // WebSocket dispatch thread, same hazard runOneShotQuery was already fixed for: a
+        // reconnect storm (up to ~125 concurrent LIVE_FEED_INIT{latestOnly:true} messages per
+        // LiveFeedDataSourceConfig's own sizing comment) blocks that shared pool on DB round-trips
+        // plus a potentially-stalled client send, delaying every OTHER session's frames. Dispatched
+        // onto queryExecutor instead; ordering (snapshot fully sent before this session is
+        // registered for live broadcasts - see below) is preserved by keeping both steps in one
+        // task instead of racing two.
+        try {
+            queryExecutor.execute(() -> initLiveFeedTail(session, filterObjects, latestOnly));
+        } catch (RejectedExecutionException e) {
+            LOGGER.warn("Query executor queue full; rejecting LIVE_FEED_INIT for session {}", session.getId());
+            send(session, "{\"error\":\"server_busy\"}");
+        }
+    }
+
+    private void initLiveFeedTail(WebSocketSession session, List<FilterCriteria.FilterObject> filterObjects,
+                                   boolean latestOnly) {
         // Send the bootstrap snapshot BEFORE registering the session for live broadcasts. If we
         // registered first, a live tick (fired from the PG-listener thread) could interleave with
         // this snapshot and the client could receive a newer candle followed by the older snapshot,
         // overwriting fresh data with stale. Snapshot-then-subscribe guarantees the client never
         // sees a bootstrap value that's older than a live update it already applied.
-        if (Boolean.TRUE.equals(messageMap.get("latestOnly"))) {
+        if (latestOnly) {
             try {
                 send(session, historicalDataService.getLatestPerFilterAsJson(filterObjects));
             } catch (Exception e) {

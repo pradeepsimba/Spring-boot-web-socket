@@ -78,7 +78,7 @@ public final class HistoricalDataQueryBuilder {
         validateSize(criteria.getIntervals());
 
         if (hasFilterObjects(criteria)) {
-            return buildFindByFilterObjects(criteria.getFilterObjects());
+            return buildFindByFilterObjects(criteria);
         }
 
         if (criteria.getFromTime() == null && criteria.getToTime() == null
@@ -129,12 +129,28 @@ public final class HistoricalDataQueryBuilder {
         return new SqlQuery(sql.toString(), params.toArray());
     }
 
-    private static SqlQuery buildFindByFilterObjects(List<FilterCriteria.FilterObject> filterObjects) {
-        StringBuilder sql = new StringBuilder(HISTORICAL_SELECT).append(" WHERE ");
+    private static SqlQuery buildFindByFilterObjects(FilterCriteria criteria) {
+        StringBuilder sql = new StringBuilder(HISTORICAL_SELECT).append(" WHERE (");
         List<Object> params = new ArrayList<>();
-        appendFilterObjectDisjunction(sql, params, filterObjects);
-        // No time bound here either - a bare (stockname, symbol, interval) match against a
-        // fine-grained interval could otherwise return years of history in one response.
+        appendFilterObjectDisjunction(sql, params, criteria.getFilterObjects());
+        sql.append(")");
+        // Was unconditionally ignoring fromTime/toTime (and any of stockNames/stockSymbols/
+        // intervals) whenever filterObjects was also present - a caller combining filterObjects
+        // with a time range (e.g. "just RELIANCE 1m, but only today") got the time bound silently
+        // dropped and up to MAX_RESULTS rows of that symbol's ENTIRE history back instead, with no
+        // error indicating the range was ignored. Applying the same fromTime/toTime bounds buildFind
+        // uses for its non-filterObjects path closes that gap; stockNames/stockSymbols/intervals are
+        // deliberately still not combined with filterObjects since a filterObject already fully
+        // specifies (stockname, symbol, interval) - combining them would only ever narrow to the
+        // same or fewer rows, at the cost of a much more complex query.
+        if (criteria.getFromTime() != null) {
+            sql.append(" AND h.start_time >= ?");
+            params.add(criteria.getFromTime());
+        }
+        if (criteria.getToTime() != null) {
+            sql.append(" AND h.start_time <= ?");
+            params.add(criteria.getToTime());
+        }
         sql.append(" ORDER BY h.start_time DESC LIMIT ").append(MAX_RESULTS);
         return new SqlQuery(sql.toString(), params.toArray());
     }
