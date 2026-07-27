@@ -367,19 +367,32 @@ public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
         }
 
         boolean latestOnly = Boolean.TRUE.equals(messageMap.get("latestOnly"));
-        // The DB query (when latestOnly) + registration below used to run directly on the shared
-        // WebSocket dispatch thread, same hazard runOneShotQuery was already fixed for: a
-        // reconnect storm (up to ~125 concurrent LIVE_FEED_INIT{latestOnly:true} messages per
-        // LiveFeedDataSourceConfig's own sizing comment) blocks that shared pool on DB round-trips
-        // plus a potentially-stalled client send, delaying every OTHER session's frames. Dispatched
-        // onto queryExecutor instead; ordering (snapshot fully sent before this session is
-        // registered for live broadcasts - see below) is preserved by keeping both steps in one
-        // task instead of racing two.
-        try {
-            queryExecutor.execute(() -> initLiveFeedTail(session, filterObjects, latestOnly));
-        } catch (RejectedExecutionException e) {
-            LOGGER.warn("Query executor queue full; rejecting LIVE_FEED_INIT for session {}", session.getId());
-            send(session, "{\"error\":\"server_busy\"}");
+        if (latestOnly) {
+            // Only THIS path touches the DB (the bootstrap-snapshot query) - the same hazard
+            // runOneShotQuery was already fixed for: a reconnect storm (up to ~125 concurrent
+            // LIVE_FEED_INIT{latestOnly:true} messages per LiveFeedDataSourceConfig's own sizing
+            // comment) blocks the shared dispatch thread on DB round-trips plus a potentially-
+            // stalled client send, delaying every OTHER session's frames. Dispatched onto
+            // queryExecutor instead; ordering (snapshot fully sent before this session is
+            // registered for live broadcasts - see initLiveFeedTail) is preserved by keeping both
+            // steps in one task instead of racing two.
+            //
+            // Was unconditionally dispatching initLiveFeedTail here regardless of latestOnly -
+            // the plain (non-snapshot) case does nothing but fast, in-memory registration with NO
+            // I/O, so there was nothing to isolate from the dispatch thread. Deferring it to
+            // queryExecutor anyway opened a real gap: a broadcast for the exact filter just
+            // subscribed to could arrive and find nothing in liveFeedIndex yet (registration
+            // hadn't run), silently dropping that tick for a session that, from the client's
+            // perspective, had already finished subscribing. Keeping the no-DB-query path
+            // synchronous (below) closes that gap and matches the original guarantee.
+            try {
+                queryExecutor.execute(() -> initLiveFeedTail(session, filterObjects, true));
+            } catch (RejectedExecutionException e) {
+                LOGGER.warn("Query executor queue full; rejecting LIVE_FEED_INIT for session {}", session.getId());
+                send(session, "{\"error\":\"server_busy\"}");
+            }
+        } else {
+            initLiveFeedTail(session, filterObjects, false);
         }
     }
 

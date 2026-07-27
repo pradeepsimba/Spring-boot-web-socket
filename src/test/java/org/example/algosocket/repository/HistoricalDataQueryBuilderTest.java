@@ -55,13 +55,46 @@ class HistoricalDataQueryBuilderTest {
 
         assertThat(query.sql())
                 // stockname/stock_symbol case-insensitive (UPPER() both sides); interval stays
-                // exact - see appendFilterObjectDisjunction's comment.
-                .contains("WHERE (UPPER(h.stockname) = UPPER(?) AND UPPER(h.stock_symbol) = UPPER(?) AND h.interval = ?)"
-                        + " OR (UPPER(h.stockname) = UPPER(?) AND UPPER(h.stock_symbol) = UPPER(?) AND h.interval = ?)")
+                // exact - see appendFilterObjectDisjunction's comment. The whole disjunction is
+                // wrapped in its OWN outer parens (WHERE ((A) OR (B)), not WHERE (A) OR (B)) -
+                // unconditionally, even with no other criteria to AND onto it here - so that a
+                // fromTime/toTime bound appended in another test case is guaranteed to apply to
+                // the whole disjunction rather than just its last branch (AND binds tighter than
+                // OR in SQL).
+                .contains("WHERE ((UPPER(h.stockname) = UPPER(?) AND UPPER(h.stock_symbol) = UPPER(?) AND h.interval = ?)"
+                        + " OR (UPPER(h.stockname) = UPPER(?) AND UPPER(h.stock_symbol) = UPPER(?) AND h.interval = ?))")
                 .contains("ORDER BY h.start_time DESC LIMIT " + HistoricalDataQueryBuilder.MAX_RESULTS)
                 .contains("NULL::text AS quote", "NULL::text AS ltp", "NULL::text AS snap")
                 .doesNotContain("LEFT JOIN app_info");
         assertThat(query.params()).containsExactly("NIFTY 50", "NIFTY", "1m", "TCS", "TCS", "5m");
+    }
+
+    @Test
+    void buildFind_withFilterObjectsAndTimeRange_boundsApplyToWholeDisjunctionNotJustLastBranch() {
+        // Regression test: buildFindByFilterObjects used to build the disjunction with NO
+        // wrapping parens and then just append "AND h.start_time >= ?" etc after it - since SQL's
+        // AND binds tighter than OR, that AND scoped to only the LAST OR branch, not the whole
+        // disjunction, silently letting a time-unbounded query return the symbol's entire history
+        // for every branch except the last one.
+        FilterCriteria criteria = new FilterCriteria();
+        LocalDateTime from = LocalDateTime.of(2026, 1, 1, 0, 0);
+        LocalDateTime to = LocalDateTime.of(2026, 1, 2, 0, 0);
+        criteria.setFromTime(from);
+        criteria.setToTime(to);
+        criteria.setFilterObjects(List.of(
+                filterObject("NIFTY 50", "NIFTY", "1m"),
+                filterObject("TCS", "TCS", "5m")
+        ));
+
+        SqlQuery query = HistoricalDataQueryBuilder.buildFind(criteria);
+
+        assertThat(query.sql())
+                .contains("WHERE ((UPPER(h.stockname) = UPPER(?) AND UPPER(h.stock_symbol) = UPPER(?) AND h.interval = ?)"
+                        + " OR (UPPER(h.stockname) = UPPER(?) AND UPPER(h.stock_symbol) = UPPER(?) AND h.interval = ?))"
+                        + " AND h.start_time >= ? AND h.start_time <= ?");
+        // Time params come after the disjunction's own params, matching the SQL's own left-to-right
+        // placeholder order.
+        assertThat(query.params()).containsExactly("NIFTY 50", "NIFTY", "1m", "TCS", "TCS", "5m", from, to);
     }
 
     @Test

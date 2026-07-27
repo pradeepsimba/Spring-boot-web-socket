@@ -125,9 +125,12 @@ class HistoricalDataWebSocketHandlerTest {
         String json = "{\"type\":\"LIVE_FEED_INIT\",\"filters\":[{\"stockname\":\"NIFTY 50\",\"stock_symbol\":\"NIFTY\",\"interval\":\"1m\"}],\"latestOnly\":true}";
         handler.handleTextMessage(session, new TextMessage(json));
 
-        verify(historicalDataService).getLatestPerFilterAsJson(any());
+        // The latestOnly path (DB query + send) is dispatched onto queryExecutor (see
+        // initLiveFeed) rather than run synchronously - timeout() polls instead of asserting
+        // instantly, since neither call may have happened yet the moment handleTextMessage returns.
+        verify(historicalDataService, timeout(1000)).getLatestPerFilterAsJson(any());
         ArgumentCaptor<TextMessage> captor = ArgumentCaptor.forClass(TextMessage.class);
-        verify(session).sendMessage(captor.capture());
+        verify(session, timeout(1000)).sendMessage(captor.capture());
         assertThat(captor.getValue().getPayload()).contains("NIFTY 50");
     }
 
@@ -178,11 +181,13 @@ class HistoricalDataWebSocketHandlerTest {
         String json = "{\"type\":\"LIVE_FEED_INIT\",\"filters\":[{\"stockname\":\"NIFTY 50\",\"stock_symbol\":\"NIFTY\",\"interval\":\"1m\"}],\"latestOnly\":true}";
         handler.handleTextMessage(session, new TextMessage(json));
 
-        // Only the snapshot; the concurrent broadcast must NOT have reached this session. Not
-        // racy despite async dispatch: the session isn't in liveFeedIndex yet at this point, so
-        // broadcastRealTimeData's lookup finds nothing to schedule at all - there's no pending
-        // async task to wait for here, so an immediate verify is correct.
-        verify(session, times(1)).sendMessage(any(TextMessage.class));
+        // The whole latestOnly tail (snapshot send + registration) runs as one task on
+        // queryExecutor now (see initLiveFeed) rather than synchronously - timeout() waits for
+        // the snapshot send to happen. The concurrent broadcast fired from inside the mock's
+        // thenAnswer still must not have reached this session: it runs on the SAME queryExecutor
+        // task, strictly before registration (which follows the send() call below it in
+        // initLiveFeedTail), so liveFeedIndex has nothing for it to find regardless of timing.
+        verify(session, timeout(1000).times(1)).sendMessage(any(TextMessage.class));
 
         // And after init completes, the session IS subscribed - a later broadcast reaches it,
         // dispatched async (see submitSend) - timeout() polls for it.
