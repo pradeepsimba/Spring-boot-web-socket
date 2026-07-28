@@ -742,9 +742,14 @@
       row.classList.add("updated");
     }
 
-    // Update the small "Updated HH:MM:SS" text next to an interval heading
-    function setLastUpdated(sectionId) {
-      const el = document.querySelector(`#${sectionId} .last-updated`);
+    // Update the small "Updated HH:MM:SS" text next to an interval heading. Takes the section
+    // ELEMENT, not its id string - building a CSS selector like `#${sectionId} .last-updated`
+    // breaks the instant a stock name/symbol contains a space or other CSS-special character
+    // (e.g. "NIFTY 50": an unescaped space in an ID selector is a descendant combinator, not a
+    // literal space, so the browser rejects the whole thing as an invalid selector). The caller
+    // already has the section element on hand from its own getElementById lookup - reuse it.
+    function setLastUpdated(section) {
+      const el = section.querySelector(".last-updated");
       if (el) el.textContent = "Updated " + new Date().toLocaleTimeString();
     }
 
@@ -1087,7 +1092,7 @@
         }
       }
 
-      setLastUpdated(sectionId);
+      setLastUpdated(section);
 
       // Live ticks carry the current quote/ltp/snap too (see PostgresNotificationListener's
       // fetch) - refresh the stock's info panel so it doesn't stay frozen at whatever the
