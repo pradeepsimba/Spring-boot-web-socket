@@ -12,6 +12,11 @@ services:
       - "host.docker.internal:host-gateway"
     mem_limit: 768m
     restart: always
+    # spring.lifecycle.timeout-per-shutdown-phase (application.properties) gives the app a 20s
+    # graceful-drain budget on SIGTERM (PostgresNotificationListener.stop(), broadcast-executor
+    # awaitTermination). Compose's own default stop_grace_period is 10s, which would SIGKILL the
+    # container mid-drain before the app's own budget is even used up - set above it here.
+    stop_grace_period: 25s
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8083/actuator/health"]
       interval: 30s
