@@ -34,7 +34,12 @@ class HistoricalDataQueryBuilderTest {
                 // stockname/stock_symbol are matched case-insensitively (UPPER() on both sides) to
                 // mirror the Django backend's __iexact convention for these two columns.
                 .contains("AND UPPER(h.stockname) IN (UPPER(?),UPPER(?))")
-                .contains("LIMIT " + HistoricalDataQueryBuilder.MAX_RESULTS)
+                // The row cap is applied PER (stockname, stock_symbol, interval) group via a
+                // ROW_NUMBER() window, not as a single LIMIT on the combined result set - otherwise
+                // one or two high-frequency groups could consume the whole budget and silently
+                // starve every other matched group.
+                .contains("ROW_NUMBER() OVER (PARTITION BY h.stockname, h.stock_symbol, h.interval ORDER BY h.start_time DESC) AS rn")
+                .contains("WHERE ranked.rn <= " + HistoricalDataQueryBuilder.MAX_RESULTS)
                 // Regression guard: historical rows must NOT join app_info's always-current
                 // quote/ltp/snap - that would attach today's live quote to old candle rows.
                 .contains("NULL::text AS quote")
@@ -63,7 +68,10 @@ class HistoricalDataQueryBuilderTest {
                 // OR in SQL).
                 .contains("WHERE ((UPPER(h.stockname) = UPPER(?) AND UPPER(h.stock_symbol) = UPPER(?) AND h.interval = ?)"
                         + " OR (UPPER(h.stockname) = UPPER(?) AND UPPER(h.stock_symbol) = UPPER(?) AND h.interval = ?))")
-                .contains("ORDER BY h.start_time DESC LIMIT " + HistoricalDataQueryBuilder.MAX_RESULTS)
+                // Per-group cap (see the regression test in the other test case's comment for why
+                // this replaced a single global LIMIT).
+                .contains("ROW_NUMBER() OVER (PARTITION BY h.stockname, h.stock_symbol, h.interval ORDER BY h.start_time DESC) AS rn")
+                .contains("WHERE ranked.rn <= " + HistoricalDataQueryBuilder.MAX_RESULTS)
                 .contains("NULL::text AS quote", "NULL::text AS ltp", "NULL::text AS snap")
                 .doesNotContain("LEFT JOIN app_info");
         assertThat(query.params()).containsExactly("NIFTY 50", "NIFTY", "1m", "TCS", "TCS", "5m");

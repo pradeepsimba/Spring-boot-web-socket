@@ -260,6 +260,38 @@
       outline: none;
       border-color: #4caf5088;
     }
+
+    /* Stock picker (search input + dropdown of matches from /api/stock-picker/) */
+    .stock-picker { position: relative; flex: 1; min-width: 220px; }
+    .stock-picker-dropdown {
+      display: none;
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      right: 0;
+      max-height: 240px;
+      overflow-y: auto;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      box-shadow: 0 6px 16px rgba(0,0,0,0.25);
+      z-index: 20;
+    }
+    .stock-picker-dropdown.open { display: block; }
+    .stock-picker-option {
+      padding: 8px 12px;
+      font-size: 0.85rem;
+      color: var(--text);
+      cursor: pointer;
+    }
+    .stock-picker-option:hover,
+    .stock-picker-option.highlighted { background: var(--row-hover); }
+    .stock-picker-option .sym { color: var(--text-muted); font-size: 0.75rem; margin-left: 6px; }
+    .stock-picker-empty {
+      padding: 8px 12px;
+      font-size: 0.8rem;
+      color: var(--empty-text);
+    }
     .intervals-row { font-size: 0.8rem; color: var(--text-muted); }
     .form-label { font-size: 0.8rem; color: var(--text-sub); font-weight: 600; }
     .intervals-row label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
@@ -545,8 +577,10 @@
   <main>
     <div id="stockForm" class="stock-form">
       <div class="form-row">
-        <input type="text" id="inputStockname" placeholder="Stock name (e.g. Kotak Bank)">
-        <input type="text" id="inputStockSymbol" placeholder="Stock symbol (e.g. KOTAKBANK)">
+        <div class="stock-picker">
+          <input type="text" id="inputStockSearch" placeholder="Search a tracked stock by name or symbol…" autocomplete="off">
+          <div id="stockPickerDropdown" class="stock-picker-dropdown"></div>
+        </div>
       </div>
       <div class="form-row intervals-row">
         <span class="form-label">Intervals:</span>
@@ -583,6 +617,7 @@
     // include_info=true attaches each candle's current quote/ltp/snap (from app_info) - opt-in
     // server-side since it costs an extra query per stock/interval otherwise skipped by default.
     const API_URL = `https://${location.hostname}:8000/api/historical-data/?from_date=${FROM_DATE}&to_date=${TO_DATE}&include_info=true`;
+    const STOCK_PICKER_URL = `https://${location.hostname}:8000/api/stock-picker/`;
     const WS_URL  = `ws://${location.host}/historical-data`;
 
     // Stocks to display — populated from the input form below (see addStock()), not hardcoded.
@@ -808,6 +843,76 @@
 
 
     /* ===========================================================
+       STOCK PICKER  (search dropdown fed from /api/stock-picker/,
+       replacing free-text stock name/symbol entry)
+    =========================================================== */
+
+    let ALL_STOCKS = [];       // [{name, trading_symbol}, ...] - fetched once on load
+    let selectedStock = null;  // the currently chosen {name, trading_symbol}, or null
+    const MAX_PICKER_RESULTS = 20;
+
+    async function fetchStockPickerList() {
+      try {
+        const res = await fetch(STOCK_PICKER_URL);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        ALL_STOCKS = await res.json();
+      } catch (err) {
+        showError(`Failed to load the tracked stock list: ${err.message}`);
+      }
+    }
+
+    function closeStockPickerDropdown() {
+      const dd = document.getElementById("stockPickerDropdown");
+      dd.classList.remove("open");
+      dd.innerHTML = "";
+    }
+
+    function renderStockPickerResults(matches) {
+      const dd = document.getElementById("stockPickerDropdown");
+      dd.innerHTML = "";
+      if (matches.length === 0) {
+        dd.innerHTML = `<div class="stock-picker-empty">No matching tracked stock</div>`;
+      } else {
+        matches.slice(0, MAX_PICKER_RESULTS).forEach(stock => {
+          const opt = document.createElement("div");
+          opt.className = "stock-picker-option";
+          opt.innerHTML = `${escapeHtml(stock.name)}<span class="sym">${escapeHtml(stock.trading_symbol)}</span>`;
+          opt.addEventListener("click", () => selectStock(stock));
+          dd.appendChild(opt);
+        });
+      }
+      dd.classList.add("open");
+    }
+
+    function selectStock(stock) {
+      selectedStock = stock;
+      document.getElementById("inputStockSearch").value = `${stock.name} (${stock.trading_symbol})`;
+      closeStockPickerDropdown();
+    }
+
+    document.getElementById("inputStockSearch").addEventListener("input", (e) => {
+      // Typing again after a selection means the user is picking a new one - don't silently
+      // keep adding the old selectedStock if they never actually click a fresh match.
+      selectedStock = null;
+      const term = e.target.value.trim().toLowerCase();
+      if (!term) { closeStockPickerDropdown(); return; }
+      const matches = ALL_STOCKS.filter(s =>
+        s.name.toLowerCase().includes(term) || s.trading_symbol.toLowerCase().includes(term));
+      renderStockPickerResults(matches);
+    });
+
+    document.getElementById("inputStockSearch").addEventListener("focus", (e) => {
+      if (e.target.value.trim() && !selectedStock) e.target.dispatchEvent(new Event("input"));
+    });
+
+    // Close the dropdown on an outside click, without stealing focus/clicks meant for the input
+    // or its own options (those are handled by their own listeners above).
+    document.addEventListener("click", (e) => {
+      if (!e.target.closest(".stock-picker")) closeStockPickerDropdown();
+    });
+
+
+    /* ===========================================================
        STOCK INPUT FORM  (add/remove stocks before loading data)
     =========================================================== */
 
@@ -832,15 +937,12 @@
     }
 
     function addStock() {
-      const stocknameInput = document.getElementById("inputStockname");
-      const stockSymbolInput = document.getElementById("inputStockSymbol");
-      const stockname = stocknameInput.value.trim();
-      const stockSymbol = stockSymbolInput.value.trim();
+      const searchInput = document.getElementById("inputStockSearch");
       const intervals = Array.from(document.querySelectorAll("#stockForm .intervals-row input:checked"))
         .map(cb => cb.value);
 
-      if (!stockname || !stockSymbol) {
-        showError("Enter both a stock name and a stock symbol before adding.");
+      if (!selectedStock) {
+        showError("Search for a tracked stock above and pick one from the dropdown before adding.");
         return;
       }
       if (intervals.length === 0) {
@@ -848,6 +950,9 @@
         return;
       }
       showError("");
+
+      const stockname = selectedStock.name;
+      const stockSymbol = selectedStock.trading_symbol;
 
       // Merge into an existing entry for the same stock instead of pushing a duplicate - two
       // entries with the same stock_symbol would make renderData() create two DOM elements with
@@ -864,9 +969,9 @@
       }
       renderPendingStocks();
 
-      stocknameInput.value = "";
-      stockSymbolInput.value = "";
-      stocknameInput.focus();
+      selectedStock = null;
+      searchInput.value = "";
+      searchInput.focus();
     }
 
     document.getElementById("addStockBtn").addEventListener("click", addStock);
@@ -1111,6 +1216,7 @@
     applyAutoScroll(autoScroll);
     setLoadBtnText("init");
     renderPendingStocks();
+    fetchStockPickerList();
     document.getElementById("loadBtn").addEventListener("click", fetchHistoricalData);
 
   </script>

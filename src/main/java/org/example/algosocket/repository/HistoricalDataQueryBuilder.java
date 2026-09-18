@@ -17,7 +17,7 @@ public final class HistoricalDataQueryBuilder {
      * "now": PostgresNotificationListener's live-broadcast fetch (a row that was just inserted/
      * updated) and buildFindLatestPerFilter below (explicitly "the current candle"). Reused by
      * PostgresNotificationListener.FETCH_BY_IDS_SQL_PREFIX - do not repurpose for historical
-     * queries; see HISTORICAL_SELECT for why.
+     * queries; see HISTORICAL_SELECT_RANKED for why.
      */
     public static final String BASE_SELECT =
             "SELECT h.*, i.quote, i.ltp, i.snap FROM app_historical_data h LEFT JOIN app_info i ON h.info_id = i.id";
@@ -31,9 +31,18 @@ public final class HistoricalDataQueryBuilder {
      * and no current caller consumes these fields on this path - so return null rather than either
      * silently-wrong or speculatively-expensive data. Revisit if a caller actually needs point-in-
      * time quote/ltp/snap attached to historical rows.
+     *
+     * <p>Carries a ROW_NUMBER() window column (partitioned by (stockname, stock_symbol, interval),
+     * ordered by start_time DESC) so buildFind/buildFindByFilterObjects can apply MAX_RESULTS PER
+     * GROUP via {@link #wrapWithPerGroupLimit} instead of once globally - see MAX_RESULTS's javadoc
+     * for why a single global LIMIT on the combined result set was a bug. Not used by
+     * buildFindLatestPerFilter, which already limits itself to one row per group via DISTINCT ON and
+     * has no need for a window function.
      */
-    private static final String HISTORICAL_SELECT =
-            "SELECT h.*, NULL::text AS quote, NULL::text AS ltp, NULL::text AS snap FROM app_historical_data h";
+    private static final String HISTORICAL_SELECT_RANKED =
+            "SELECT h.*, NULL::text AS quote, NULL::text AS ltp, NULL::text AS snap, " +
+            "ROW_NUMBER() OVER (PARTITION BY h.stockname, h.stock_symbol, h.interval ORDER BY h.start_time DESC) AS rn "
+            + "FROM app_historical_data h";
 
     /**
      * Bounds any single filter list so a client can't force construction of a huge OR/IN SQL
@@ -47,9 +56,14 @@ public final class HistoricalDataQueryBuilder {
     public static final int MAX_FILTER_LIST_SIZE = 300;
 
     /**
-     * Hard cap applied to every non-filterObjects query, regardless of which criteria were given -
-     * without this, a client-supplied wide fromTime/toTime range (or no criteria at all) could pull
-     * the entire table into heap in one response.
+     * Cap on how many rows any single (stockname, stock_symbol, interval) group may contribute to
+     * buildFind/buildFindByFilterObjects' result - without this, a client-supplied wide fromTime/
+     * toTime range (or no criteria at all) could pull the entire table into heap in one response.
+     * Applied PER GROUP via a ROW_NUMBER() OVER (PARTITION BY ...) window, not as a single global
+     * LIMIT on the whole result set: a global LIMIT let one or two high-frequency stocks/intervals
+     * consume the entire budget, silently returning zero rows for every other matched group with no
+     * truncation indicator - partitioning guarantees each matched group gets up to this many of its
+     * own most-recent rows regardless of how many other groups also matched.
      */
     public static final int MAX_RESULTS = 5000;
 
@@ -88,7 +102,7 @@ public final class HistoricalDataQueryBuilder {
                     "At least one of filterObjects, fromTime/toTime, stockNames, stockSymbols, or intervals is required");
         }
 
-        StringBuilder sql = new StringBuilder(HISTORICAL_SELECT).append(" WHERE 1=1");
+        StringBuilder sql = new StringBuilder(HISTORICAL_SELECT_RANKED).append(" WHERE 1=1");
         List<Object> params = new ArrayList<>();
 
         if (criteria.getFromTime() != null) {
@@ -105,9 +119,8 @@ public final class HistoricalDataQueryBuilder {
         // filters interval= directly, not __iexact - interval values are fixed lowercase tokens
         // like "1m"/"5m"/"1d", never user-typed with varying case).
         appendInClause(sql, params, "h.interval", criteria.getIntervals());
-        sql.append(" ORDER BY h.start_time DESC LIMIT ").append(MAX_RESULTS);
 
-        return new SqlQuery(sql.toString(), params.toArray());
+        return new SqlQuery(wrapWithPerGroupLimit(sql.toString()), params.toArray());
     }
 
     /**
@@ -130,7 +143,7 @@ public final class HistoricalDataQueryBuilder {
     }
 
     private static SqlQuery buildFindByFilterObjects(FilterCriteria criteria) {
-        StringBuilder sql = new StringBuilder(HISTORICAL_SELECT).append(" WHERE (");
+        StringBuilder sql = new StringBuilder(HISTORICAL_SELECT_RANKED).append(" WHERE (");
         List<Object> params = new ArrayList<>();
         appendFilterObjectDisjunction(sql, params, criteria.getFilterObjects());
         sql.append(")");
@@ -151,8 +164,18 @@ public final class HistoricalDataQueryBuilder {
             sql.append(" AND h.start_time <= ?");
             params.add(criteria.getToTime());
         }
-        sql.append(" ORDER BY h.start_time DESC LIMIT ").append(MAX_RESULTS);
-        return new SqlQuery(sql.toString(), params.toArray());
+        return new SqlQuery(wrapWithPerGroupLimit(sql.toString()), params.toArray());
+    }
+
+    /**
+     * Wraps an inner query built from {@link #HISTORICAL_SELECT_RANKED} (which must already carry
+     * an {@code rn} window column) so only the top MAX_RESULTS rows of EACH (stockname,
+     * stock_symbol, interval) group survive, instead of one LIMIT applied to the combined result
+     * set - see MAX_RESULTS's javadoc for why a single global LIMIT is the bug this fixes.
+     */
+    private static String wrapWithPerGroupLimit(String innerSqlWithRankColumn) {
+        return "SELECT * FROM (" + innerSqlWithRankColumn + ") ranked WHERE ranked.rn <= " + MAX_RESULTS
+                + " ORDER BY ranked.start_time DESC";
     }
 
     private static void appendFilterObjectDisjunction(StringBuilder sql, List<Object> params,

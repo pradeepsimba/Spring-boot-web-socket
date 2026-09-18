@@ -42,7 +42,28 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
 
     private static final long INITIAL_BACKOFF_MS = 1_000;
     private static final long MAX_BACKOFF_MS = 30_000;
-    private static final long NOTIFICATION_POLL_TIMEOUT_MS = 1_000;
+    // getNotifications(timeout) is a blocking socket read, not a periodic poll - it returns the
+    // instant a NOTIFY arrives, so this value does NOT add latency to real notification delivery
+    // during actual trading activity. It only bounds how long the loop can sit idle (affecting how
+    // soon `running`/the keepalive check gets re-evaluated) during a genuinely quiet gap with zero
+    // notifications. Lowered from 1000ms as a zero-downside safety margin, not because it was
+    // actually delaying live ticks.
+    private static final long NOTIFICATION_POLL_TIMEOUT_MS = 200;
+
+    // How often, while otherwise idle inside the LISTEN poll loop, this connection is actively
+    // probed for liveness. getNotifications()/LISTEN rely entirely on an I/O exception to detect a
+    // dead connection - but a connection silently dropped by a NAT/firewall/load-balancer idle
+    // timeout (no RST sent) produces no I/O exception at all: getNotifications() just keeps
+    // returning null/empty forever, indistinguishable from a healthy-but-quiet feed. Running a
+    // trivial round trip on this schedule forces that failure to surface promptly instead of never.
+    private static final long KEEPALIVE_INTERVAL_MS = 30_000;
+
+    // Hard cap on the number of rows a single post-reconnect catch-up query may return. Postgres
+    // NOTIFY is fire-and-forget and not queued for a disconnected/not-yet-listening client, so any
+    // insert/update that happened during a dropped connection would otherwise be silently and
+    // permanently lost - this bounds that one recovery query the same way MAX_FETCH_BATCH_SIZE
+    // bounds a normal notification batch, so an unusually long outage can't build one huge query.
+    private static final int CATCHUP_MAX_ROWS = 5_000;
 
     private final HistoricalDataWebSocketHandler webSocketHandler;
     // The live-feed-dedicated pool (see LiveFeedDataSourceConfig) - NOT the main spring.datasource
@@ -158,13 +179,22 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
     // it after listenOnce() returns would be dead code: the inner loop only exits on shutdown.)
     private volatile long backoffMs = INITIAL_BACKOFF_MS;
 
+    // Marks how far this listener has caught up: the latest updated_at it has either (a) actually
+    // processed via a normal NOTIFY-driven fetch, or (b) established as a safe starting point at the
+    // moment a LISTEN connection first came up (see listenOnce). Only ever read/written from this
+    // listener's own single thread (run()/listenOnce()/fetchAndBroadcast() all execute serially on
+    // it - fetchChunk's futures are joined before fetchAndBroadcast returns), so no synchronization
+    // is needed beyond volatile visibility for isConnected()-style external reads. Null only before
+    // this listener's very first successful connection, when there is nothing yet to catch up from.
+    private volatile LocalDateTime lastProcessedMarker;
+
     @Override
     public void run() {
         while (running) {
             try {
                 listenOnce();
             } catch (Exception e) {
-                LOGGER.warn("PostgresNotificationListener connection lost: {}", e.getMessage());
+                LOGGER.warn("PostgresNotificationListener connection lost: {}", e.getMessage(), e);
             } finally {
                 connected = false;
                 triggerConfirmed = false;
@@ -199,8 +229,37 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
             backoffMs = INITIAL_BACKOFF_MS; // healthy connection established - reset backoff
             LOGGER.info("Started listening for PostgreSQL notifications on 'new_historical_data'.");
 
+            // Catch up on anything that changed while this listener was disconnected (network blip,
+            // DB restart, dropped connection) - NOTIFY gives no queue/replay for a listener that
+            // wasn't connected/listening at the time, so without this, a row inserted/updated during
+            // that gap would never be broadcast at all, with no signal anything was missed. Skipped
+            // only on this listener's very first-ever connection, when there is no prior marker and
+            // therefore nothing yet to have missed.
+            LocalDateTime catchUpSince = lastProcessedMarker;
+            LocalDateTime listenEstablishedAt = LocalDateTime.now();
+            if (catchUpSince != null) {
+                runCatchUp(catchUpSince);
+            }
+            lastProcessedMarker = listenEstablishedAt;
+
+            long lastKeepAliveAtMs = System.currentTimeMillis();
             while (running) {
                 PGNotification[] notifications = pgConn.getNotifications((int) NOTIFICATION_POLL_TIMEOUT_MS);
+
+                long nowMs = System.currentTimeMillis();
+                if (nowMs - lastKeepAliveAtMs >= KEEPALIVE_INTERVAL_MS) {
+                    // Forces a real round trip on this connection so a silent drop (no RST, e.g. a
+                    // NAT/firewall/LB idle timeout) is detected here instead of leaving the listener
+                    // believing it's still connected indefinitely with a dead feed - getNotifications()
+                    // alone would keep returning null/empty forever in that scenario. isValid() issues
+                    // exactly the trivial no-op round trip this is meant to be.
+                    if (!conn.isValid(queryTimeoutSeconds)) {
+                        throw new java.sql.SQLException(
+                                "Live-feed LISTEN connection failed keepalive check (isValid returned false)");
+                    }
+                    lastKeepAliveAtMs = nowMs;
+                }
+
                 if (notifications == null || notifications.length == 0) continue;
 
                 // LinkedHashSet, not a List: the NOTIFY trigger fires on every INSERT OR UPDATE, and
@@ -264,7 +323,7 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
             try {
                 rows.addAll(future.join());
             } catch (Exception e) {
-                LOGGER.warn("Error fetching a chunk of live data: {}", e.getMessage());
+                LOGGER.warn("Error fetching a chunk of live data: {}", e.getMessage(), e);
             }
         }
 
@@ -277,6 +336,7 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
         rows.sort(Comparator.comparingLong(HistoricalData::getId));
 
         long maxLagMs = 0;
+        LocalDateTime maxUpdatedAt = null;
         for (HistoricalData data : rows) {
             // updated_at is stamped by the writer at insert/update time, so now - updated_at
             // approximates end-to-end lag (write -> NOTIFY -> this fetch) - the metric that matters
@@ -284,8 +344,19 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
             if (data.getUpdatedAt() != null) {
                 long lagMs = Duration.between(data.getUpdatedAt(), LocalDateTime.now()).toMillis();
                 if (lagMs > maxLagMs) maxLagMs = lagMs;
+                if (maxUpdatedAt == null || data.getUpdatedAt().isAfter(maxUpdatedAt)) {
+                    maxUpdatedAt = data.getUpdatedAt();
+                }
             }
             webSocketHandler.broadcastRealTimeData(data);
+        }
+
+        // Advance the catch-up marker as normal notifications are processed (not just at connection
+        // start) so that if THIS connection later drops, the next reconnect's catch-up query only
+        // has to cover the true gap since the last row actually seen, rather than redoing this
+        // entire (possibly hours-long) connected session's worth of already-broadcast rows.
+        if (maxUpdatedAt != null && (lastProcessedMarker == null || maxUpdatedAt.isAfter(lastProcessedMarker))) {
+            lastProcessedMarker = maxUpdatedAt;
         }
 
         if (maxLagMs > LAG_WARN_THRESHOLD_MS) {
@@ -326,9 +397,51 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
             // LISTEN connection is a different pool slot with different failure characteristics).
             // Tracked so LiveFeedHealthIndicator can surface this failure mode too.
             consecutiveFetchFailures.incrementAndGet();
-            LOGGER.warn("Error fetching live data for ids {}: {}", ids, e.getMessage());
+            LOGGER.warn("Error fetching live data for ids {}: {}", ids, e.getMessage(), e);
             return List.of();
         }
+    }
+
+    /**
+     * After a (re)connect, runs one bounded query for rows whose updated_at is after {@code since}
+     * and feeds the resulting ids through the same {@link #fetchAndBroadcast} path used for normal
+     * notifications - see the KEEPALIVE_INTERVAL_MS/CATCHUP_MAX_ROWS javadoc above and the call site
+     * in listenOnce for why this exists. Runs on a connection borrowed from the live-feed pool
+     * (mirrors fetchChunk), never the dedicated LISTEN connection, which must stay free to keep
+     * polling notifications.
+     */
+    private void runCatchUp(LocalDateTime since) {
+        String sql = "SELECT h.id FROM app_historical_data h WHERE h.updated_at > ? "
+                + "ORDER BY h.updated_at ASC LIMIT " + CATCHUP_MAX_ROWS;
+        List<Long> ids = new ArrayList<>();
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setQueryTimeout(queryTimeoutSeconds);
+            ps.setObject(1, since);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    ids.add(rs.getLong("id"));
+                }
+            }
+        } catch (Exception e) {
+            LOGGER.warn("Catch-up query for rows changed since {} failed - any updates missed while " +
+                    "disconnected will NOT be recovered for this reconnect: {}", since, e.getMessage(), e);
+            return;
+        }
+
+        if (ids.isEmpty()) {
+            LOGGER.info("Catch-up after reconnect: no rows changed since {}.", since);
+            return;
+        }
+
+        if (ids.size() >= CATCHUP_MAX_ROWS) {
+            LOGGER.warn("Catch-up after reconnect hit the {}-row cap for changes since {} - some missed " +
+                    "updates older than the {} most recent may not have been recovered.",
+                    CATCHUP_MAX_ROWS, since, CATCHUP_MAX_ROWS);
+        } else {
+            LOGGER.info("Catch-up after reconnect: recovering {} row(s) changed since {}.", ids.size(), since);
+        }
+        fetchAndBroadcast(ids);
     }
 
     /** Above this many consecutive fetchChunk failures, the fetch path is reported unhealthy. */
@@ -387,7 +500,7 @@ public class PostgresNotificationListener implements Runnable, ApplicationListen
             return true;
         } catch (Exception e) {
             LOGGER.error("Error creating trigger/function - live feed notifications will NOT work " +
-                    "until this is fixed (check the DB role has CREATE privilege): {}", e.getMessage());
+                    "until this is fixed (check the DB role has CREATE privilege): {}", e.getMessage(), e);
             return false;
         }
     }

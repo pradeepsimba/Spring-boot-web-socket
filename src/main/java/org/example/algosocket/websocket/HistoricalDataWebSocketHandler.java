@@ -219,7 +219,7 @@ public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
                 runOneShotQuery(session, filterCriteria);
             }
         } catch (Exception e) {
-            LOGGER.warn("Failed to process message from session {}: {}", session.getId(), e.getMessage());
+            LOGGER.warn("Failed to process message from session {}: {}", session.getId(), e.getMessage(), e);
             send(session, "{\"error\":\"invalid_request\"}");
         }
     }
@@ -236,7 +236,7 @@ public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
                             LOGGER.warn("One-shot query timed out for session {}", session.getId());
                             send(session, "{\"error\":\"query_timeout\"}");
                         } else {
-                            LOGGER.warn("One-shot query failed for session {}: {}", session.getId(), ex.getMessage());
+                            LOGGER.warn("One-shot query failed for session {}: {}", session.getId(), ex.getMessage(), ex);
                             send(session, "{\"error\":\"query_failed\"}");
                         }
                     }, queryExecutor);
@@ -268,7 +268,7 @@ public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
         try {
             return objectMapper.writeValueAsString(List.of(data));
         } catch (Exception e) {
-            LOGGER.warn("Failed to serialize real-time data: {}", e.getMessage());
+            LOGGER.warn("Failed to serialize real-time data: {}", e.getMessage(), e);
             return null;
         }
     }
@@ -279,7 +279,7 @@ public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
         try {
             sender.sendMessage(new TextMessage(payload));
         } catch (Exception e) {
-            LOGGER.warn("Failed to send message to session {}, evicting: {}", session.getId(), e.getMessage());
+            LOGGER.warn("Failed to send message to session {}, evicting: {}", session.getId(), e.getMessage(), e);
             evict(session);
         }
     }
@@ -408,7 +408,7 @@ public class HistoricalDataWebSocketHandler extends TextWebSocketHandler {
                 send(session, historicalDataService.getLatestPerFilterAsJson(filterObjects));
             } catch (Exception e) {
                 LOGGER.warn("Failed to send live-feed bootstrap snapshot to session {}: {}",
-                        session.getId(), e.getMessage());
+                        session.getId(), e.getMessage(), e);
             }
         }
 
